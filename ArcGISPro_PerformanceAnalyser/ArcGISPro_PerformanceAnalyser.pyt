@@ -44,22 +44,24 @@ tool is the exception: it can analyse another .aprx while Pro stays open,
 because it snapshots that file and never opens it as the active project.
 
 Nothing here signs in to anything and no host is contacted unless you name one.
-Workstation changes require "Apply the gated fixes"; project recovery requires
-its own explicit mode and writes only a new copy. Every change reports how to
-go back, and no original project or source data is deleted.
+The in-Pro workstation tool is always read-only. AP-01 belongs to the separate
+command-line run with Pro closed; the former AP-02 GPU preference change was
+retired because forcing an adapter can cause a startup crash. Project recovery
+requires its own explicit mode and writes only a new copy. No original project
+or source data is deleted.
 
 Provenance
 ----------
-  arcgis_pro_performance_analyser.py        9931 lines  sha256:268bc367fb28
+  arcgis_pro_performance_analyser.py       10509 lines  sha256:3cbd625c3c7c
   html_report.py                             966 lines  sha256:184c9b6eaf73
-  toolbox_glue.py                            869 lines  sha256:9a95f3f43878
+  toolbox_glue.py                            869 lines  sha256:9b8784c4dacf
 """
 
 from __future__ import print_function
 
 # ============================================================================
 # 1/3  diagnostic engine
-# source: arcgis_pro_performance_analyser.py  (sha256:268bc367fb28)
+# source: arcgis_pro_performance_analyser.py  (sha256:3cbd625c3c7c)
 # ----------------------------------------------------------------------------
 # r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 #
@@ -321,6 +323,15 @@ _ESRI_REQ = ("Esri - Configuration syst\u00e8me requise pour ArcGIS Pro "
              "(chiffres publi\u00e9s : minimum, recommand\u00e9, optimal)",
              "https://doc.esri.com/fr/arcgis-pro/latest/get-started/"
              "arcgis-pro-system-requirements.html")
+_ESRI_ADDINS = ("Esri - Gérer les add-ins ArcGIS Pro et leurs dossiers",
+                "https://pro.arcgis.com/en/pro-app/latest/get-started/"
+                "manage-add-ins.htm")
+_ESRI_ADDIN_DIAG = ("Esri - Diagnostiquer les add-ins ArcGIS Pro",
+                    "https://pro.arcgis.com/en/pro-app/latest/sdk/api-reference/"
+                    "conceptdocs/docs/ProGuide-Diagnosing-ArcGIS-Pro-Add-ins.html")
+_ESRI_ADDIN_VERSION = ("Esri - Chargement et compatibilité des add-ins/configurations",
+                       "https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/"
+                       "conceptdocs/docs/ProConcepts-Advanced-Topics.html")
 _MS_NIC = ("Microsoft - MSFT_NetAdapterPowerManagementSettingData",
            "https://learn.microsoft.com/en-us/previous-versions/windows/"
            "desktop/legacy/hh872363(v=vs.85)")
@@ -393,6 +404,7 @@ SOURCES = {
     "PF-28": [_ESRI_REQ, _R_SINGLE, _ESRI_CA],
     "PF-29": [_ESRI_REQ, _ESRI_TROUBLE, _ESRI_3D],
     "PF-30": [_R_CRASH, _R_ONEDRIVE, _R_SLOWMAP],
+    "PF-31": [_ESRI_ADDINS, _ESRI_ADDIN_DIAG, _ESRI_ADDIN_VERSION],
 }
 
 
@@ -426,6 +438,28 @@ PROJECT_HISTORY_WARN = 100
 PROJECT_HISTORY_WARN_BYTES = 10 * 1024 ** 2
 PROJECT_REPAIR_MODES = ("none", "repack", "views", "views_history")
 PROJECT_CHECK_IDS = ("PR-01", "PR-02", "PR-03", "PR-04", "PR-05", "PR-06")
+
+# Startup customisation packages are inspected without loading their code or
+# extracting them. Directory walks, package counts, XML reads and optional CRC
+# work are all bounded; reaching a cap makes the inventory explicitly partial.
+ADDIN_SCAN_LIMIT = 400
+ADDIN_MAX_PACKAGES = 64
+ADDIN_MAX_PACKAGE_BYTES = 256 * 1024 ** 2
+ADDIN_MAX_PACKAGE_ENTRIES = 5000
+ADDIN_CONFIG_MAX_BYTES = 1024 ** 2
+ADDIN_CRC_MAX_EXPANDED_BYTES = 32 * 1024 ** 2
+ADDIN_FULL_CRC_MAX = 4
+ADDIN_PACKAGE_EXTENSIONS = {
+    ".esriaddinx": "add-in",
+    ".proconfigx": "managed configuration",
+    ".esriplugin": "plug-in data source",
+}
+ADDIN_FOLDER_KEYS = (
+    ("user", r"HKCU\SOFTWARE\ESRI\ArcGISPro\Settings\Add-In Folders"),
+    ("administrator", r"HKLM\SOFTWARE\ESRI\ArcGISPro\Settings\Add-In Folders"),
+    ("user configuration", r"HKCU\SOFTWARE\ESRI\ArcGISPro\Settings\Configuration Folders"),
+    ("administrator configuration", r"HKLM\SOFTWARE\ESRI\ArcGISPro\Settings\Configuration Folders"),
+)
 
 # A Pro user.config is a few kilobytes of XML. This ceiling is not about Pro:
 # it is about a file this tool did not write, in a folder OneDrive may sync
@@ -684,10 +718,10 @@ GUIDANCE_FR = {
         ["Faites une copie du projet avant de l'alléger.", "Séparez les cartes par métier et retirez de la copie les cartes, mises en page et couches inutilisées.", "Réduisez les groupements inutiles et l'historique de géotraitement conservé.", "Utilisez Enregistrer sous depuis ArcGIS Pro quand le projet s'ouvre encore ; sinon testez la copie de récupération proposée par l'outil projet."],
         "Relancez PF-10 sur la copie et vérifiez que toutes les cartes nécessaires sont toujours présentes."),
     "PF-11": (
-        "Windows ne désigne pas explicitement la carte graphique hautes performances pour ArcGISPro.exe, ou la préférence est illisible.",
-        "Sur un portable à deux GPU, Pro peut utiliser le circuit intégré et afficher plus lentement les cartes et scènes.",
-        ["Fermez ArcGIS Pro.", "Dans Windows, ouvrez Paramètres > Système > Affichage > Graphismes et sélectionnez ArcGISPro.exe.", "Choisissez Hautes performances, ou laissez AP-02 écrire cette préférence dans HKCU.", "Redémarrez Pro sur secteur et vérifiez le GPU réellement utilisé."],
-        "Relancez PF-11 et vérifiez dans les informations de rendu que le GPU attendu est utilisé."),
+        "Windows ne désigne pas explicitement la carte graphique hautes performances pour ArcGISPro.exe, ou la préférence est illisible. Ce réglage est un choix de rendu, pas un correctif de stabilité.",
+        "Sur un portable à deux GPU, Pro peut utiliser le circuit intégré et afficher plus lentement les cartes et scènes. Forcer un GPU dont le pilote est instable peut au contraire provoquer un crash dès l'écran de démarrage.",
+        ["Fermez ArcGIS Pro.", "Si le crash est apparu après un ancien AP-02, ouvrez le rapport JSON de ce passage et exécutez exactement sa commande undo pour restaurer la valeur précédente.", "Sinon, dans Windows, ouvrez Paramètres > Système > Affichage > Graphismes et sélectionnez ArcGISPro.exe ; ne choisissez Hautes performances que si Pro est stable et le pilote pris en charge.", "Pour distinguer une extension tierce, testez ArcGISPro.exe /disableaddins.", "Redémarrez Pro sur secteur et vérifiez le GPU réellement utilisé."],
+        "Pro doit franchir l'écran de démarrage sans crash. Relancez ensuite PF-11 et vérifiez dans les informations de rendu que le GPU attendu est utilisé."),
     "PF-12": (
         "La mémoire installée ou libre est insuffisante pour le projet et les autres applications. Windows compense alors par le fichier d'échange.",
         "Ralentissements brutaux, longues pauses de disque et, sous forte pression mémoire, fermeture d'ArcGIS Pro.",
@@ -768,6 +802,11 @@ GUIDANCE_FR = {
         "Parcours, synchronisation, sauvegarde et accès disque plus lents ; sur partage, chaque petit fichier ajoute de la latence.",
         ["Repérez dans la preuve les dossiers qui portent réellement le volume ou le nombre de fichiers.", "Déplacez une copie de travail vers un SSD local non synchronisé.", "Construisez les pyramides nécessaires et retirez uniquement les anciennes sorties dont vous n'avez plus besoin.", "Pour les données partagées en édition, utilisez l'architecture de géodatabase validée par votre organisation plutôt qu'une copie concurrente."],
         "Relancez PF-30 et mesurez l'ouverture depuis le nouvel emplacement sans changer les couches."),
+    "PF-31": (
+        "ArcGIS Pro charge au démarrage les add-ins, configurations et plug-ins trouvés dans les dossiers personnels ou bien connus. Le contrôle relève leur compatibilité et leur structure ; leur seule présence ne prouve pas un crash.",
+        "Une version incompatible, une DAML illisible, une assembly absente ou une copie d'assembly Esri peut empêcher le chargement, ralentir le splash screen ou fermer ArcGIS Pro avant tout projet.",
+        ["Confirmez d'abord avec ArcGISPro.exe /disableaddins : ce test isole le groupe, sans désigner un package précis.", "Comparez les chemins, desktopVersion, assemblies et modules autoLoad de PF-31 avec le module défaillant de DL-13.", "Fermez Pro, puis déplacez un seul package suspect vers un dossier local de quarantaine situé hors de tous les dossiers bien connus ; ne supprimez rien.", "Relancez Pro normalement après chaque isolement et restaurez le package s'il n'est pas impliqué. Pour une configuration imposée par l'administrateur, faites modifier le déploiement par ce dernier.", "Réinstallez uniquement une version déclarée compatible avec le build PF-04, après validation de l'éditeur ou du service informatique."],
+        "ArcGIS Pro doit franchir plusieurs démarrages normaux sans /disableaddins. Relancez PF-31 pour prouver quel package a été isolé et vérifiez que DL-13 n'enregistre plus le même crash."),
     "PR-01": (
         "Le fichier sélectionné n'est pas une archive .aprx lisible et intègre, ou l'un de ses éléments a échoué au contrôle CRC. Le diagnostic distingue cette corruption d'un simple projet volumineux.",
         "ArcGIS Pro peut refuser le projet ou se fermer pendant sa lecture. Une réparation automatique est refusée si tous les éléments ne peuvent pas être vérifiés.",
@@ -1770,9 +1809,9 @@ def decide_index(res_bytes, res_files, connection_copies, status_stamp,
 def decide_gpu_preference(exe, value, readable=True):
     """PF-11. Which adapter Windows hands ArcGIS Pro.
 
-    With no value Windows decides, and on a hybrid laptop that regularly means
-    the integrated adapter. Setting it is one registry string, it is per-user,
-    and it is exactly what the Graphics page of Settings writes.
+    This stays advice, never an automatic fix. Selecting a different adapter
+    can move a startup crash onto a machine whose other driver was stable;
+    absence of a crash during the probe cannot prove that the switch is safe.
     """
     if not readable:
         return dict(
@@ -1793,9 +1832,10 @@ def decide_gpu_preference(exe, value, readable=True):
                      "integrated one." % (exe, GPU_PREFERENCE_KEY),
             expected="%s, high performance." % GPU_PREFERENCE_WANTED,
             impact="S4 and slow draw. Not a data-loss cause.",
-            fix="Set it through Settings > System > Display > Graphics > high "
-                "performance, or let --apply write it and print the undo.",
-            autofixable=True)
+            fix="Only while Pro is stable, review Settings > System > Display "
+                "> Graphics with the graphics administrator. If a crash began "
+                "after an older AP-02 run, use that report's exact undo "
+                "command to restore the previous value before relaunching.")
     good = GPU_PREFERENCE_WANTED.rstrip(";") in value
     return dict(
         cid="PF-11", category="Hardware", status="Pass" if good else "Warn",
@@ -1804,11 +1844,12 @@ def decide_gpu_preference(exe, value, readable=True):
         expected="%s. 0 lets Windows decide, 1 is power saving and the "
                  "integrated adapter, 2 is high performance."
                  % GPU_PREFERENCE_WANTED,
-        impact="S4 and slow draw.",
-        fix="Set it through Settings > System > Display > Graphics, or let "
-            "--apply write it. On a discrete-only machine also confirm the "
-            "vendor control panel, which keeps a separate profile store.",
-        autofixable=True)
+        impact="S4 and slow draw; an incompatible forced adapter can also "
+               "crash Pro at the splash screen.",
+        fix="Review the adapter and supported driver with the graphics "
+            "administrator; this tool never changes the preference. If a "
+            "crash began after an older AP-02 run, use that report's exact "
+            "undo command to restore the previous value.")
 
 
 def decide_memory(total_gb, free_gb):
@@ -2109,7 +2150,10 @@ def classify_event(log, event):
                 if ntpath.basename(d or "").lower() == "arcgispro.exe"]:
             return None
         if provider == "Application Error" and eid == 1000:
-            return "ArcGIS Pro crashed (Application Error 1000)"
+            module = (ntpath.basename(event["data"][3])
+                      if len(event["data"]) > 3 and event["data"][3] else "")
+            return ("ArcGIS Pro crashed (Application Error 1000)"
+                    + ("; fault module: %s" % module if module else ""))
         if provider == "Application Hang" and eid == 1002:
             return "ArcGIS Pro hung and was ended (Application Hang 1002)"
         return None
@@ -2805,6 +2849,35 @@ class Env(object):
             return []
         return out
 
+    def reg_values(self, path, limit=256):
+        """(value-name mapping, error) for one key, with an explicit cap.
+
+        Add-In Folders stores each folder as a VALUE NAME, not as a subkey or
+        as data under a known value. An absent key is an empty mapping; an
+        unreadable key is None, so the inventory cannot confuse the two.
+        """
+        if not self.windows:
+            return None, "the registry is not available on this platform"
+        try:
+            import winreg
+            key = self._open_key(path)
+            try:
+                count = winreg.QueryInfoKey(key)[1]
+                out = {}
+                for index in range(min(count, limit)):
+                    name, value, _kind = winreg.EnumValue(key, index)
+                    out[name] = value
+                if count > limit:
+                    return out, "value cap %d reached; %d values were not read" % (
+                        limit, count - limit)
+                return out, None
+            finally:
+                key.Close()
+        except FileNotFoundError:
+            return {}, None
+        except Exception as exc:
+            return None, "%s" % exc
+
     def reg_write(self, path, name, value):
         """Write one string value. Only reached from --apply."""
         import winreg
@@ -3319,6 +3392,72 @@ class Env(object):
             return None, count, "%s" % exc
         return int((time.time() - started) * 1000), count, None
 
+    def startup_package(self, path, full_crc=False):
+        """Read one startup package's directory and configuration, never code.
+
+        The optional whole-archive CRC is capped by expanded bytes. The DAML or
+        XML read has its own decompressed-byte cap. Every failure is data for
+        PF-31, not an exception that can abort the rest of the diagnostic.
+        """
+        import zipfile
+        result = {"members": [], "config": None, "config_error": None,
+                  "crc": "not run (package budget)", "error": None}
+        archive = None
+        try:
+            if os.path.getsize(path) > ADDIN_MAX_PACKAGE_BYTES:
+                result["error"] = ("package exceeds the %d-byte inspection cap"
+                                   % ADDIN_MAX_PACKAGE_BYTES)
+                return result
+            archive = zipfile.ZipFile(path)
+            infos = archive.infolist()
+            if len(infos) > ADDIN_MAX_PACKAGE_ENTRIES:
+                result["error"] = ("package has more than %d entries"
+                                   % ADDIN_MAX_PACKAGE_ENTRIES)
+                return result
+            result["members"] = [info.filename for info in infos]
+            if full_crc:
+                expanded = sum(max(0, info.file_size) for info in infos)
+                if expanded > ADDIN_CRC_MAX_EXPANDED_BYTES:
+                    result["crc"] = ("not run (expanded size %d exceeds cap %d)"
+                                     % (expanded, ADDIN_CRC_MAX_EXPANDED_BYTES))
+                else:
+                    bad = archive.testzip()
+                    result["crc"] = ("failed at %s" % bad if bad else
+                                     "passed for every archive member")
+            expected = ("config.xml" if path.lower().endswith(".esriplugin")
+                        else "config.daml")
+            candidates = [info for info in infos
+                          if info.filename.replace("\\", "/").lower() == expected]
+            if len(candidates) > 1:
+                result["config_error"] = ("multiple root %s entries make the "
+                                          "package ambiguous" % expected)
+                return result
+            if not candidates:
+                return result
+            info = candidates[0]
+            if info.file_size > ADDIN_CONFIG_MAX_BYTES:
+                result["config_error"] = ("%s exceeds the %d-byte XML cap"
+                                          % (info.filename, ADDIN_CONFIG_MAX_BYTES))
+                return result
+            handle = archive.open(info, "r")
+            try:
+                raw = handle.read(ADDIN_CONFIG_MAX_BYTES + 1)
+            finally:
+                handle.close()
+            if len(raw) > ADDIN_CONFIG_MAX_BYTES:
+                result["config_error"] = ("%s decompressed beyond the XML cap"
+                                          % info.filename)
+                return result
+            result["config"] = raw.decode("utf-8-sig", "replace")
+            return result
+        except Exception as exc:
+            result["error"] = "%s: %s" % (type(exc).__name__, exc)
+            result["crc"] = "failed or incomplete"
+            return result
+        finally:
+            if archive is not None:
+                archive.close()
+
     def read_zip_json(self, path, max_entries=APRX_MAX_ENTRIES,
                       max_entry=APRX_MAX_ENTRY_BYTES, max_total=APRX_MAX_BYTES):
         """([(name, text)], truncated, None) or ([], False, reason).
@@ -3386,6 +3525,238 @@ class Env(object):
         if unreadable:
             return out, truncated, "; ".join(unreadable)
         return out, truncated, None
+
+
+def _xml_local(tag):
+    """An XML tag without its namespace."""
+    return (tag or "").rsplit("}", 1)[-1]
+
+
+def _version_pair(text):
+    """(major, minor) from an Esri version, ignoring its build components."""
+    found = re.match(r"^\s*(\d+)(?:\.(\d+))?", text or "")
+    return (int(found.group(1)), int(found.group(2) or 0)) if found else None
+
+
+def parse_startup_package(path, kind, payload):
+    """Turn one raw package read into metadata and evidence-based warnings.
+
+    No DLL is loaded and no file is extracted. Compatibility with the installed
+    Pro release is decided later, when that release is available to the report.
+    """
+    record = {"path": path, "kind": kind, "name": ntpath.basename(path),
+              "source": "", "modified": "", "size": 0,
+              "id": "", "version": "", "desktop_version": "",
+              "default_assembly": "", "company": "", "assemblies": [],
+              "startup_modules": [], "warnings": [], "info": [],
+              "crc": payload.get("crc") or "not measured"}
+    if payload.get("error"):
+        record["warnings"].append("Package could not be inspected: %s"
+                                  % payload["error"])
+        return record
+    if record["crc"].lower().startswith("failed"):
+        record["warnings"].append("Archive CRC verification failed: %s"
+                                  % record["crc"])
+    members = [p.replace("\\", "/") for p in payload.get("members") or []]
+    assemblies = sorted(set(ntpath.basename(p) for p in members
+                            if p.lower().endswith(".dll")), key=str.lower)
+    record["assemblies"] = assemblies
+    esri_copies = [name for name in assemblies
+                   if name.lower().startswith("arcgis.desktop.")
+                   or name.lower() in ("arcgis.core.dll", "arcgis.corehost.dll")]
+    if esri_copies:
+        record["warnings"].append(
+            "Bundled Esri API assemblies can shadow the installed Pro runtime "
+            "and have documented startup-crash potential: %s"
+            % ", ".join(esri_copies))
+    config = payload.get("config")
+    expected_config = "Config.xml" if kind == "plug-in data source" else "Config.daml"
+    if payload.get("config_error"):
+        record["warnings"].append(payload["config_error"])
+        return record
+    if not config:
+        record["warnings"].append("%s is absent or unreadable; package "
+                                  "compatibility cannot be established"
+                                  % expected_config)
+        return record
+    if re.search(r"<!\s*DOCTYPE", config, re.IGNORECASE):
+        record["warnings"].append("%s contains a DOCTYPE and was refused"
+                                  % expected_config)
+        return record
+    from xml.etree import ElementTree
+    try:
+        root = ElementTree.fromstring(config)
+    except (ElementTree.ParseError, ValueError) as exc:
+        record["warnings"].append("%s is not valid XML: %s"
+                                  % (expected_config, exc))
+        return record
+    default_assembly = root.get("defaultAssembly") or ""
+    record["default_assembly"] = default_assembly
+    if default_assembly and ntpath.basename(default_assembly).lower() not in [
+            name.lower() for name in assemblies]:
+        record["warnings"].append(
+            "defaultAssembly=%s is declared but no assembly with that name "
+            "exists in the package" % default_assembly)
+    info = next((node for node in root.iter()
+                 if _xml_local(node.tag) == "AddInInfo"), None)
+    if info is not None:
+        record["id"] = info.get("id") or ""
+        record["version"] = info.get("version") or ""
+        record["desktop_version"] = info.get("desktopVersion") or ""
+        for node in info:
+            if _xml_local(node.tag) == "Name" and (node.text or "").strip():
+                record["name"] = node.text.strip()
+            elif _xml_local(node.tag) == "Company":
+                record["company"] = (node.text or "").strip()
+    elif kind != "plug-in data source":
+        record["warnings"].append("AddInInfo is missing; id, version and "
+                                  "desktopVersion cannot be read")
+    startup = []
+    for node in root.iter():
+        if (_xml_local(node.tag) == "insertModule"
+                and (node.get("autoLoad") or "").strip().lower() == "true"):
+            startup.append(node.get("className") or node.get("id") or
+                           "<unnamed module>")
+    record["startup_modules"] = sorted(set(startup))
+    if kind == "managed configuration":
+        record["info"].append("A managed configuration can customise the "
+                              "splash screen and startup experience")
+    return record
+
+
+def decide_addins(records, coverage, pro_version, crash_modules=None,
+                  platform_readable=True):
+    """PF-31. Startup customisations, without calling presence a crash cause."""
+    lines = ["Offline inventory: no add-in code was loaded or extracted; "
+             "digital signatures were not verified."]
+    lines.extend("COVERAGE: %s" % reason for reason in coverage)
+    if not platform_readable:
+        return dict(cid="PF-31", category="ArcGISPro", status="Info",
+                    measured=False, title="Startup add-ins and configurations",
+                    observed="Add-in folders and packages are inspected on "
+                             "Windows only.",
+                    expected="A readable Windows add-in inventory.",
+                    impact="S6 and S1 undetermined.",
+                    fix="Run the BAT launcher or CLI on the affected Windows "
+                        "workstation, in the user's own session.")
+    crash_names = set(ntpath.basename(name or "").lower()
+                      for name in (crash_modules or []) if name)
+    id_counts = {}
+    for record in records:
+        if record.get("id"):
+            key = record["id"].strip().lower()
+            id_counts[key] = id_counts.get(key, 0) + 1
+    issue_count = 0
+    crash_matches = 0
+    installed = _version_pair(pro_version)
+    for record in records:
+        warnings = list(record.get("warnings") or [])
+        info = list(record.get("info") or [])
+        target = _version_pair(record.get("desktop_version"))
+        if record.get("kind") != "plug-in data source":
+            if not record.get("desktop_version"):
+                if not any("AddInInfo" in w or "Config.daml" in w
+                           or "inspected" in w for w in warnings):
+                    warnings.append("desktopVersion is absent or unreadable")
+            elif not target or not installed:
+                info.append("Compatibility not decided: target=%s; installed "
+                            "Pro=%s" % (record.get("desktop_version"),
+                                       pro_version or "<unreadable>"))
+            elif target[0] != installed[0]:
+                warnings.append(
+                    "desktopVersion=%s targets a different major release "
+                    "than installed Pro %s" %
+                    (record.get("desktop_version"), pro_version))
+            elif target[1] > installed[1]:
+                warnings.append(
+                    "desktopVersion=%s requires a newer minor release than "
+                    "installed Pro %s" %
+                    (record.get("desktop_version"), pro_version))
+            else:
+                info.append("Target major/minor is compatible with Pro %s; "
+                            "this is not a stability guarantee" % pro_version)
+        matches = sorted(set(name.lower() for name in record.get("assemblies")
+                             or []) & crash_names)
+        if matches:
+            crash_matches += len(matches)
+            warnings.append("Application Error 1000 names fault module(s) "
+                            "packaged here: %s" % ", ".join(matches))
+        if record.get("id") and id_counts.get(record["id"].lower(), 0) > 1:
+            info.append("The same add-in id occurs in multiple locations; "
+                        "Esri documents that the highest add-in version loads")
+        issue_count += len(warnings)
+        lines.append("%s: %s | %s" % (record.get("kind"),
+                                      record.get("name"), record.get("path")))
+        lines.append("  source=%s; modified=%s; bytes=%s"
+                     % (record.get("source") or "<not recorded>",
+                        record.get("modified") or "<not recorded>",
+                        record.get("size") or 0))
+        lines.append("  id=%s; version=%s; desktopVersion=%s; company=%s"
+                     % (record.get("id") or "<unreadable>",
+                        record.get("version") or "<unreadable>",
+                        record.get("desktop_version") or "<unreadable>",
+                        record.get("company") or "<unreadable>"))
+        lines.append("  defaultAssembly=%s; CRC=%s; DLLs=%s"
+                     % (record.get("default_assembly") or "<not declared>",
+                        record.get("crc") or "<not measured>",
+                        ", ".join((record.get("assemblies") or [])[:16])
+                        or "<none>"))
+        if len(record.get("assemblies") or []) > 16:
+            lines.append("  ... %d more DLL(s) not printed"
+                         % (len(record["assemblies"]) - 16))
+        if record.get("startup_modules"):
+            lines.append("  autoLoad modules: %s"
+                         % ", ".join(record["startup_modules"]))
+        lines.extend("  NOTE: %s" % note for note in info)
+        lines.extend("  RISK: %s" % warning for warning in warnings)
+    if not records:
+        if coverage:
+            return dict(cid="PF-31", category="ArcGISPro", status="Info",
+                        measured=False, title="Startup add-in inventory is incomplete",
+                        observed=lines,
+                        expected="Readable default and well-known add-in folders.",
+                        impact="S6 and S1 undetermined.",
+                        fix="Read Settings > Add-In Manager and the folder "
+                            "paths named in this check; do not treat an "
+                            "incomplete inventory as no add-ins.")
+        return dict(cid="PF-31", category="ArcGISPro", status="Pass",
+                    title="No startup add-in, configuration or plug-in found",
+                    observed=lines + ["No .esriAddinX, .proConfigX or "
+                                      ".esriPlugin package was found in the "
+                                      "readable default/well-known folders."],
+                    expected="No third-party startup package when /disableaddins "
+                             "changes the startup result.",
+                    impact="S6: no startup package was found in this scope.",
+                    fix="If /disableaddins still changes the result, inspect "
+                        "Add-In Manager and any managed-configuration launch "
+                        "shortcut; this inventory does not prove another cause.")
+    return dict(
+        cid="PF-31", category="ArcGISPro",
+        status="Warn" if issue_count else "Info",
+        title=("%d startup package(s), %d compatibility/structure indicator(s)"
+               % (len(records), issue_count) if issue_count else
+               "%d startup package(s); no measured structural anomaly"
+               % len(records)),
+        observed=lines,
+        expected="Packages readable, a compatible desktopVersion, declared "
+                 "assemblies present, and no bundled Pro API assembly that "
+                 "can shadow the installed runtime.",
+        impact="S6 and S1. Startup custom code can crash Pro before a project "
+               "opens or slow its initialization. Presence alone is not proof.",
+        fix="Since /disableaddins changes the result, close Pro and isolate "
+            "ONE listed package at a time into a local quarantine folder "
+            "outside every default/well-known folder. Relaunch normally after "
+            "each move and restore uninvolved packages. Never delete them. "
+            "Correlate any DL-13 fault module and have an administrator handle "
+            "managed configurations or machine-wide folders.",
+        detail=("Coverage limits: %d entries/location, %d packages, full CRC "
+                "on at most %d packages up to %d expanded bytes each. %s"
+                % (ADDIN_SCAN_LIMIT, ADDIN_MAX_PACKAGES, ADDIN_FULL_CRC_MAX,
+                   ADDIN_CRC_MAX_EXPANDED_BYTES,
+                   "Inventory incomplete; see COVERAGE lines." if coverage else
+                   "All discovered locations were scanned within those limits.")),
+        kpi={"packages": len(records), "issues": issue_count,
+             "crash_module_matches": crash_matches})
 
 
 # =============================================================================
@@ -3662,13 +4033,85 @@ def probe_pro_version(env, facts):
     install = env.reg(PRO_REG_KEY, "InstallDir")
     exe = pro_exe_path(env)
     facts["pro_exe"] = exe
+    version = env.reg(PRO_REG_KEY, "Version")
+    real = env.reg(PRO_REG_KEY, "RealVersion")
+    facts["pro_release"] = real or version
     exe_version = None
     if env.isfile(exe):
         exe_version = "present on disk"
-    return decide_pro_version(env.reg(PRO_REG_KEY, "Version"),
-                              env.reg(PRO_REG_KEY, "RealVersion"),
-                              env.reg(PRO_REG_KEY, "BuildNumber"),
+    return decide_pro_version(version, real, env.reg(PRO_REG_KEY, "BuildNumber"),
                               install, exe_version)
+
+
+def probe_addins(env, facts):
+    """Inventory every discovered startup package within explicit limits."""
+    if not env.registry_readable():
+        return decide_addins([], [], None, platform_readable=False)
+    coverage = []
+    locations = []
+    docs = documents_path(env)
+    if docs:
+        locations.append(("default user", ntpath.join(
+            docs, "ArcGIS", "AddIns"), False))
+    else:
+        coverage.append("Documents shell folder is unreadable, so the default "
+                        "ArcGIS/AddIns tree was not scanned")
+    for scope, key in ADDIN_FOLDER_KEYS:
+        values, error = env.reg_values(key)
+        if values is None:
+            coverage.append("%s is unreadable: %s" % (key, error))
+            continue
+        if error:
+            coverage.append("%s: %s" % (key, error))
+        for folder in values:
+            if isinstance(folder, str) and folder.strip():
+                locations.append((scope, expand_vars(env, folder.strip()), True))
+    unique_locations = []
+    seen = set()
+    for scope, path, registered in locations:
+        key = _norm(path)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_locations.append((scope, path, registered))
+    packages = {}
+    for scope, folder, registered in unique_locations:
+        if not env.isdir(folder):
+            if registered:
+                coverage.append("registered folder is absent or unreadable: "
+                                "%s (%s)" % (folder, scope))
+            continue
+        entries, unreadable = env.scan(folder, depth=3,
+                                       limit=ADDIN_SCAN_LIMIT)
+        coverage.extend("%s (%s)" % (line, scope) for line in unreadable)
+        if len(entries) >= ADDIN_SCAN_LIMIT:
+            coverage.append("scan cap %d reached at %s; inventory may be "
+                            "incomplete" % (ADDIN_SCAN_LIMIT, folder))
+        for entry in entries:
+            if entry.isdir:
+                continue
+            kind = ADDIN_PACKAGE_EXTENSIONS.get(
+                ntpath.splitext(entry.name)[1].lower())
+            if kind:
+                packages[_norm(entry.path)] = (entry, kind, scope)
+    ordered = sorted(packages.values(),
+                     key=lambda row: (row[0].mtime, row[0].path), reverse=True)
+    if len(ordered) > ADDIN_MAX_PACKAGES:
+        coverage.append("package cap %d reached; %d package(s) were not "
+                        "inspected" % (ADDIN_MAX_PACKAGES,
+                                       len(ordered) - ADDIN_MAX_PACKAGES))
+    records = []
+    for index, (entry, kind, scope) in enumerate(ordered[:ADDIN_MAX_PACKAGES]):
+        payload = env.startup_package(entry.path,
+                                      full_crc=index < ADDIN_FULL_CRC_MAX)
+        record = parse_startup_package(entry.path, kind, payload)
+        record["source"] = scope
+        record["modified"] = stamp(entry.mtime)
+        record["size"] = entry.size
+        records.append(record)
+    facts["addin_inventory"] = records
+    return decide_addins(records, coverage, facts.get("pro_release"),
+                         facts.get("crash_modules"))
 
 
 def probe_rendering(env, facts):
@@ -3720,9 +4163,8 @@ def probe_index(env, facts):
 def probe_gpu_preference(env, facts):
     exe = facts.get("pro_exe") or pro_exe_path(env)
     facts["pro_exe"] = exe
-    facts["gpu_previous"] = env.reg(GPU_PREFERENCE_KEY, exe)
-    return decide_gpu_preference(exe, facts["gpu_previous"],
-                                env.registry_readable())
+    value = env.reg(GPU_PREFERENCE_KEY, exe)
+    return decide_gpu_preference(exe, value, env.registry_readable())
 
 
 def probe_memory(env, facts):
@@ -3812,6 +4254,7 @@ def probe_events(env, facts):
     rows = []
     unreadable = []
     capped = []
+    fault_modules = []
     queries = event_queries()
     for log, query in queries:
         text, error = env.events(log, query, EVENT_MAX)
@@ -3825,6 +4268,11 @@ def probe_events(env, facts):
             what = classify_event(log, event)
             if what:
                 rows.append((event["when"], what))
+            if (log == "Application" and event["provider"] == "Application Error"
+                    and event["id"] == 1000 and what
+                    and len(event["data"]) > 3 and event["data"][3]):
+                fault_modules.append(ntpath.basename(event["data"][3]))
+    facts["crash_modules"] = sorted(set(name.lower() for name in fault_modules))
     return decide_events(rows, unreadable, len(queries), capped)
 
 
@@ -5640,6 +6088,8 @@ def registrations(env, facts, opts):
          False, lambda: probe_share_latency(env, facts)),
         ("PF-04", "ArcGISPro", "Pro version and patch level", False,
          lambda: probe_pro_version(env, facts)),
+        ("PF-31", "ArcGISPro", "Startup add-ins, configurations and plug-ins",
+         False, lambda: probe_addins(env, facts)),
         ("PF-05", "Display", "Rendering and display settings", False,
          lambda: probe_rendering(env, facts)),
         ("PF-06", "Cache", "ESRI local caches", False,
@@ -5761,39 +6211,12 @@ def fix_cache_aside(env, checks, facts):
             "when": stamp(env.now())}
 
 
-def fix_gpu_preference(env, checks, facts):
-    """Pin ArcGIS Pro to the high-performance graphics adapter."""
-    exe = facts.get("pro_exe")
-    if not exe:
-        return None
-    previous = facts.get("gpu_previous")
-    env.reg_write(GPU_PREFERENCE_KEY, exe, GPU_PREFERENCE_WANTED)
-    quoted_exe = quote_cmd(exe)
-    if quoted_exe and quote_cmd(previous or ""):
-        if previous:
-            undo = ('reg add "%s" /v %s /t REG_SZ /d %s /f'
-                    % (GPU_PREFERENCE_KEY, quoted_exe, quote_cmd(previous)))
-        else:
-            undo = 'reg delete "%s" /v %s /f' % (GPU_PREFERENCE_KEY,
-                                                 quoted_exe)
-    else:
-        undo = ("the value named %s under %s was set to %s; undo it through "
-                "Settings > System > Display > Graphics, because that path "
-                "cannot be quoted safely on a command line"
-                % (exe, GPU_PREFERENCE_KEY, GPU_PREFERENCE_WANTED))
-    return {"id": "AP-02",
-            "what": "Pinned ArcGIS Pro to the high-performance graphics "
-                    "adapter.",
-            "result": "%s = %s  (previous: %s)"
-                      % (exe, GPU_PREFERENCE_WANTED, previous or "<none>"),
-            "undo": undo,
-            "when": stamp(env.now())}
-
-
 # (id, the check it acts on, is it per-user, extra gate, handler)
+# AP-02 was retired: forcing ArcGIS Pro onto another GPU can turn a driver
+# problem into a crash before any project opens. Historical reports still
+# contain their exact undo command; new runs only diagnose PF-11.
 FIXES = (
     ("AP-01", "PF-06", True, "DL-12", fix_cache_aside),
-    ("AP-02", "PF-11", True, None, fix_gpu_preference),
 )
 
 
@@ -6243,6 +6666,21 @@ def write_report(document, directory, verbose=False):
     return text_path, json_path
 
 
+def write_html_report(document, json_path, verbose=False):
+    """Write HTML using the inline toolbox renderer or the CLI sibling.
+
+    The generated .pyt already owns ``write_html``. Resolving that global first
+    keeps its single-file promise; the stand-alone CLI loads html_report.py only
+    when --html was explicitly requested.
+    """
+    writer = globals().get("write_html")
+    if writer is None:
+        writer = __import__("html_report", fromlist=["write_html"]).write_html
+    path = unique_path(os.path.splitext(json_path)[0] + ".html")
+    return writer(document, path, verbose=verbose,
+                  exit_code=exit_code(document["checks"]))
+
+
 # =============================================================================
 # SELF-TEST
 # =============================================================================
@@ -6264,7 +6702,7 @@ class FakeEnv(Env):
                  mem=(None, None), disks=None, power=(None, None),
                  tcp_map=None, envvars=None, text=None, user="editor",
                  admin=False, clock=1700000000.0, unreadable=(), ps=None,
-                 events=None, listing=None, zips=None, netdrives=()):
+                 events=None, listing=None, zips=None, netdrives=(), packages=None):
         self._reg = dict([(_norm(k), v) for k, v in (reg or {}).items()])
         self._subkeys = dict([(_norm(k), v)
                               for k, v in (subkeys or {}).items()])
@@ -6284,6 +6722,7 @@ class FakeEnv(Env):
         self._events = dict(events or {})
         self._listing = dict([(_norm(k), v) for k, v in (listing or {}).items()])
         self._zips = dict([(_norm(k), v) for k, v in (zips or {}).items()])
+        self._packages = dict([(_norm(k), v) for k, v in (packages or {}).items()])
         self._netdrives = list(netdrives)
         self.zip_reads = []
         self.written = []
@@ -6305,6 +6744,17 @@ class FakeEnv(Env):
 
     def reg_subkeys(self, path):
         return list(self._subkeys.get(_norm(path), []))
+
+    def reg_values(self, path, limit=256):
+        values = self._reg.get(_norm(path))
+        if values is None:
+            return {}, None
+        items = list(values.items())
+        out = dict(items[:limit])
+        if len(items) > limit:
+            return out, "value cap %d reached; %d values were not read" % (
+                limit, len(items) - limit)
+        return out, None
 
     def reg_write(self, path, name, value):
         self._reg.setdefault(_norm(path), {})[name] = value
@@ -6423,6 +6873,14 @@ class FakeEnv(Env):
         return self._listing.get(_norm(path),
                                  (None, 0, "not reachable on the stand-in "
                                            "machine"))
+
+    def startup_package(self, path, full_crc=False):
+        found = self._packages.get(_norm(path))
+        if found is None:
+            return {"members": [], "config": None, "config_error": None,
+                    "crc": "failed or incomplete",
+                    "error": "package is absent from the stand-in machine"}
+        return dict(found)
 
     def read_zip_json(self, path, max_entries=APRX_MAX_ENTRIES,
                       max_entry=APRX_MAX_ENTRY_BYTES, max_total=APRX_MAX_BYTES):
@@ -7342,7 +7800,13 @@ def self_test():
     check(nogpu["status"] == "Warn",
           "no per-app GPU preference warns: Windows then picks, and on a "
           "hybrid machine that can mean the integrated adapter")
-    check(nogpu["autofixable"] is True, "and that one has a fix here")
+    check(make_check(**nogpu)["autofixable"] is False
+          and all(row[0] != "AP-02" for row in FIXES),
+          "the GPU preference is advice only: forcing another adapter can "
+          "crash Pro at the splash screen, so AP-02 is retired")
+    check("undo" in nogpu["fix"],
+          "the guidance sends an affected user to the exact undo recorded by "
+          "an older AP-02 report instead of guessing a registry value")
     check(decide_gpu_preference("e", "GpuPreference=2;")["status"] == "Pass",
           "high performance already pinned: Pass")
     check(decide_gpu_preference("e", "GpuPreference=1;")["status"] == "Warn",
@@ -7351,6 +7815,78 @@ def self_test():
           "but a registry that could not be read at all is Info: unreadable "
           "and absent are different answers, and only one of them is a "
           "finding  <-- pinned defect")
+
+    daml = """<ArcGIS defaultAssembly='Vendor.dll'
+      xmlns='http://schemas.esri.com/DADF/Registry'>
+      <AddInInfo id='{abc}' version='1.2' desktopVersion='3.3.48105'>
+        <Name>Vendor Tools</Name><Company>Vendor</Company>
+      </AddInInfo><modules><insertModule id='M' className='Vendor.Startup'
+        autoLoad='true' /></modules></ArcGIS>"""
+    payload = {"members": ["Config.daml", "Vendor.dll", "Native.dll"],
+               "config": daml, "crc": "passed for every archive member"}
+    addin = parse_startup_package(r"C:\AddIns\Vendor.esriAddinX", "add-in", payload)
+    check(addin["name"] == "Vendor Tools" and addin["desktop_version"]
+          == "3.3.48105" and addin["startup_modules"] == ["Vendor.Startup"]
+          and not addin["warnings"],
+          "a real DAML-shaped add-in yields its identity, target and startup module")
+    compatible = decide_addins([addin], [], "3.4.0")
+    check(compatible["status"] == "Info" and compatible["kpi"]["issues"] == 0,
+          "a compatible add-in is inventoried, not accused merely for being present")
+    newer = dict(addin, desktop_version="3.5.0")
+    check(decide_addins([newer], [], "3.4.0")["status"] == "Warn",
+          "an add-in targeting a newer minor Pro release warns")
+    old_major = dict(addin, desktop_version="2.9.0")
+    check(decide_addins([old_major], [], "3.4.0")["status"] == "Warn",
+          "a 2.x add-in on Pro 3.x is an established compatibility finding")
+    missing_assembly = parse_startup_package(
+        "x.esriAddinX", "add-in", dict(payload, members=["Config.daml"]))
+    check(any("defaultAssembly" in warning for warning in
+              missing_assembly["warnings"]),
+          "a DAML declaring an assembly absent from the package is named")
+    esri_copy = parse_startup_package(
+        "x.esriAddinX", "add-in",
+        dict(payload, members=["Config.daml", "Vendor.dll",
+                               "ArcGIS.Desktop.Framework.dll"]))
+    check(any("shadow" in warning for warning in esri_copy["warnings"]),
+          "a bundled Pro API assembly is flagged as a startup-crash risk")
+    correlated = decide_addins([addin], [], "3.4.0", ["native.dll"])
+    check(correlated["status"] == "Warn"
+          and correlated["kpi"]["crash_module_matches"] == 1
+          and "native.dll" in "\n".join(correlated["observed"]),
+          "Application Error's fault module is correlated with the exact package DLL")
+    corrupt = parse_startup_package(
+        "broken.esriAddinX", "add-in",
+        {"error": "BadZipFile: central directory", "members": [], "crc": "failed"})
+    check(decide_addins([corrupt], [], "3.4.0")["status"] == "Warn",
+          "an unreadable add-in archive is a finding, not a clean package")
+    doctype = parse_startup_package(
+        "xml.esriAddinX", "add-in",
+        dict(payload, config="<!DOCTYPE ArcGIS><ArcGIS />"))
+    check(any("DOCTYPE" in warning for warning in doctype["warnings"]),
+          "a DAML with a document type declaration is refused, not expanded")
+    check(decide_addins([], [], "3.4.0")["status"] == "Pass",
+          "no package in completely readable locations passes")
+    incomplete = decide_addins([], ["registered folder is unreadable"], "3.4.0")
+    check(incomplete["status"] == "Info" and incomplete["measured"] is False,
+          "an incomplete add-in inventory never reports that no add-in exists")
+    unknown_release = decide_addins([addin], [], None)
+    check(unknown_release["status"] == "Info"
+          and "Compatibility not decided" in "\n".join(
+              unknown_release["observed"]),
+          "an unreadable Pro release leaves compatibility undecided, not failed")
+    addin_env = fake_healthy()
+    addin_key = (r"HKCU\SOFTWARE\ESRI\ArcGISPro\Settings\Add-In Folders")
+    addin_path = r"C:\AddIns\Vendor.esriAddinX"
+    addin_env._reg[_norm(addin_key)] = {r"C:\AddIns": ""}
+    addin_env._tree[_norm(r"C:\AddIns")] = (
+        r"C:\AddIns", [("Vendor.esriAddinX", 1000, 1, 0, False)])
+    addin_env._packages[_norm(addin_path)] = payload
+    probed_addins = probe_addins(addin_env, {
+        "pro_release": "3.4.0", "crash_modules": ["native.dll"]})
+    check(probed_addins["status"] == "Warn"
+          and "Vendor Tools" in "\n".join(probed_addins["observed"])
+          and "source=user" in "\n".join(probed_addins["observed"]),
+          "the probe follows a HKCU well-known folder and inspects its package")
 
     check(decide_memory(None, None)["status"] == "Info",
           "memory that could not be read is Info: without that guard a failed "
@@ -7835,6 +8371,10 @@ def self_test():
                                 [r"C:\Program Files\ArcGIS\Pro\bin"
                                  r"\ArcGISPro.exe"])),
           "a Pro crash is matched by the full path of the program too")
+    check("Vendor.dll" in classify_event(
+              "Application", ev("Application Error", 1000,
+                                ["ArcGISPro.exe", "3.4.0", "123", "Vendor.dll"])),
+          "Application Error 1000 contributes its fault-module name to the report")
     check("hung" in classify_event("Application", ev("Application Hang", 1002,
                                                       ["ArcGISPro.exe"])),
           "a Pro hang is counted")
@@ -8145,7 +8685,7 @@ def self_test():
         "PF-01": "Info", "PF-09": "Info", "PF-10": "Info", "PF-14": "Info",
         "PF-16": "Warn", "PF-18": "Warn", "PF-20": "Warn", "PF-21": "Warn",
         "PF-28": "Warn", "PF-29": "Warn",
-        "PF-30": "Pass",
+        "PF-30": "Pass", "PF-31": "Pass",
     }
     for cid in sorted(expected_run):
         check(got.get(cid) == expected_run[cid],
@@ -8177,16 +8717,16 @@ def self_test():
     check(document["applied"] == [],
           "with --apply absent the applied collection stays empty across a "
           "whole run  <-- pinned defect")
-    check(len([n for n in document["notes"] if n.startswith("would apply")]) == 1,
-          "one fix would have run, and the check-only run says which")
+    check(not [n for n in document["notes"] if n.startswith("would apply")],
+          "no automatic change is proposed while Pro is running")
     check([n for n in document["notes"] if n.startswith("refused [AP-01]")],
           "the cache fix is refused while Pro is running, because clearing a "
           "live cache corrupts the session  <-- pinned defect")
     check(env.written == [],
           "and nothing whatsoever was written to the stand-in machine")
-    check(document["fixable"] == ["PF-06", "PF-11"],
-          "the summary offers both fixes, even the one the gate then refuses, "
-          "because the finding is real either way")
+    check(document["fixable"] == ["PF-06"],
+          "only the reversible cache fix is offered; PF-11 remains visible as "
+          "a finding but cannot arm a graphics-preference change")
     check(r"C:\Users\editor\OneDrive - Example" in
           by_id(document["checks"], "DL-05")["observed"],
           "the storage finding names the folder it found the projects in")
@@ -8294,8 +8834,6 @@ def self_test():
     check(fix_cache_aside(fake_sick(), [], {}) is None,
           "a fix whose target has gone since the check ran does nothing rather "
           "than guessing at a path  <-- pinned defect")
-    check(fix_gpu_preference(fake_sick(), [], {}) is None,
-          "and so does the graphics fix")
     vanished = [make_check("DL-00", "c", "t", "Pass", "measured", dataloss=True),
                 make_check("DL-12", "c", "t", "Pass", "measured", dataloss=True),
                 make_check("PF-06", "c", "t", "Warn", "measured", fix="f",
@@ -8304,8 +8842,8 @@ def self_test():
     check(gone_applied == [], "nothing is recorded as applied in that case")
     check([n for n in gone_notes if "the target it would change is gone" in n],
           "and the run says so instead of reporting a change it did not make")
-    check([n for n in gone_notes if n.startswith("skip [AP-02]")
-           and "did not run" in n],
+    missing_allowed, missing_why = apply_gate(vanished, "PF-11", True)
+    check(missing_allowed is False and "did not run" in missing_why,
           "a fix whose check never ran at all is refused by name")
 
     misprofiled = fake_sick()
@@ -8340,8 +8878,8 @@ def self_test():
     check(healthy["counts"]["Fail"] == 0, "nothing failed")
     check(healthy["counts"]["Warn"] == 0, "and nothing warned")
     check(healthy["fixable"] == [], "so no fix is offered")
-    check(len([n for n in healthy["notes"] if n.startswith("skip [AP-02]")]) == 1,
-          "the graphics fix reports itself already healthy rather than silently "
+    check(len([n for n in healthy["notes"] if n.startswith("skip [AP-01]")]) == 1,
+          "the cache fix reports itself already healthy rather than silently "
           "doing nothing")
 
     # ------------------------------------------------------- end to end, bare
@@ -8436,8 +8974,8 @@ def self_test():
     applying._procs = []
     applied_run = run(applying, opts_with(sde_server="gisdb", apply=True))
     ids_applied = [r["id"] for r in applied_run["applied"]]
-    check(ids_applied == ["AP-01", "AP-02"],
-          "with Pro closed and --apply given, both fixes run")
+    check(ids_applied == ["AP-01"],
+          "with Pro closed and --apply given, only the reversible cache fix runs")
     check(by_id(applied_run["checks"], "PF-22")["status"] == "Warn"
           and "Hydrants refreshRate = 30" in
           by_id(applied_run["checks"], "PF-22")["observed"],
@@ -8445,20 +8983,17 @@ def self_test():
           "thirty-second timer is named")
     check(len(applying.zip_reads) == 1,
           "one recent project, one read")
-    check(applying._reg[_norm(GPU_PREFERENCE_KEY)][
-              r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"]
-          == GPU_PREFERENCE_WANTED,
-          "the graphics preference is actually written")
-    undo = [r["undo"] for r in applied_run["applied"] if r["id"] == "AP-02"][0]
-    check(undo.startswith("reg delete"),
-          "and the undo deletes it again, because there was no previous value")
+    check(not [change for change in applying.written
+               if change[0] == GPU_PREFERENCE_KEY],
+          "even with --apply, no graphics preference is written; the recorded "
+          "cache rename is the only machine change")
     cache_record = [r for r in applied_run["applied"] if r["id"] == "AP-01"][0]
     check(".properf-" in cache_record["result"],
           "the cache folder is renamed aside, never deleted  <-- pinned defect")
     check(cache_record["undo"].startswith("move "),
           "and the undo moves it straight back")
     applied_text = "\n".join(render(applied_run))
-    check("APPLIED [AP-02]" in applied_text,
+    check("APPLIED [AP-01]" in applied_text,
           "the report names every change that was made")
     check("undo   :" in applied_text,
           "and prints the undo for each one beside it")
@@ -8472,23 +9007,27 @@ def self_test():
     previous._reg[_norm(GPU_PREFERENCE_KEY)] = {
         r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe": "GpuPreference=1;"}
     prev_run = run(previous, opts_with(apply=True))
-    prev_undo = [r["undo"] for r in prev_run["applied"] if r["id"] == "AP-02"][0]
-    check("GpuPreference=1;" in prev_undo,
-          "when there was a previous value, the undo restores that value "
-          "rather than deleting the setting  <-- pinned defect")
+    check(previous._reg[_norm(GPU_PREFERENCE_KEY)][
+              r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"]
+          == "GpuPreference=1;"
+          and not [change for change in previous.written
+                   if change[0] == GPU_PREFERENCE_KEY]
+          and [r["id"] for r in prev_run["applied"]] == ["AP-01"],
+          "an existing graphics preference survives --apply byte for byte: "
+          "the retired AP-02 cannot turn a driver issue into a startup crash")
 
     class FailingEnv(FakeEnv):
-        def reg_write(self, path, name, value):
+        def rename(self, src, dst):
             raise OSError("access denied")
 
     failing = fake_sick()
     failing._procs = []
     failing.__class__ = FailingEnv
     failing_run = run(failing, opts_with(apply=True))
-    check([n for n in failing_run["notes"] if n.startswith("failed [AP-02]")],
+    check([n for n in failing_run["notes"] if n.startswith("failed [AP-01]")],
           "a fix that throws is recorded as failed and does not end the run")
-    check([r["id"] for r in failing_run["applied"]] == ["AP-01"],
-          "and the fix beside it still applied")
+    check(failing_run["applied"] == [],
+          "and a failed change is never recorded as applied")
 
     # ------------------------------------------------------------- reporting
     print("-" * 70)
@@ -8859,6 +9398,20 @@ def self_test():
         check(live.read_zip_json(not_zip)[2],
               "a project file that is not a zip is a reason, not an empty "
               "project")
+        addin_zip = os.path.join(zroot, "Vendor.esriAddinX")
+        with zipfile.ZipFile(addin_zip, "w", zipfile.ZIP_DEFLATED) as zarch:
+            zarch.writestr("Config.daml", daml)
+            zarch.writestr("Vendor.dll", b"MZ-test")
+            zarch.writestr("Native.dll", b"MZ-native")
+        raw_addin = live.startup_package(addin_zip, full_crc=True)
+        check(raw_addin["config"] == daml
+              and raw_addin["crc"] == "passed for every archive member"
+              and len(raw_addin["members"]) == 3,
+              "a real add-in-shaped ZIP yields bounded DAML, members and full CRC")
+        check(not parse_startup_package(addin_zip, "add-in", raw_addin)["warnings"],
+              "and the real package parses without loading any assembly")
+        check(live.startup_package(not_zip)["error"],
+              "a corrupt add-in archive returns evidence instead of aborting the run")
 
         # A lying header. The uncompressed size in a zip's central directory
         # is a number the file's author chose, and the reader stops there, so
@@ -8910,8 +9463,8 @@ def self_test():
         for n in range(3):
             io.open(os.path.join(zroot, "f%d.txt" % n), "w").close()
         elapsed, entries, reason = live.time_listdir(zroot)
-        check(entries == 5 and elapsed >= 0 and reason is None,
-              "a real folder is listed and timed")
+        check(entries == 6 and elapsed >= 0 and reason is None,
+              "a real folder with its six fixtures is listed and timed")
         check(live.time_listdir(zroot, limit=2)[1] == 2,
               "and the listing stops at its limit")
         gone = live.time_listdir(os.path.join(zroot, "nope"))
@@ -9261,11 +9814,11 @@ def self_test():
           and by_id(unknown_run["checks"], "PF-22")["status"] == "Info",
           "and no project file is opened off a Pro nobody could see  "
           "<-- pinned defect")
-    check([r["id"] for r in unknown_run["applied"]] == ["AP-02"]
+    check(unknown_run["applied"] == [] and unknown_pro.written == []
           and [n for n in unknown_run["notes"]
                if n.startswith("refused [AP-01]")],
           "and the cache fix is refused by name, because only a Pass from "
-          "DL-12 lets it run  <-- pinned defect")
+          "DL-12 lets it run; no registry fallback is attempted  <-- pinned defect")
     check(unknown_pro.isdir(r"C:\Users\editor\AppData\Local\ESRI"
                             r"\Local Caches"),
           "the cache folder was not renamed")
@@ -9512,16 +10065,26 @@ def self_test():
           and make_output_safe(_NoReconfigure()) is False,
           "while a stream that cannot be reconfigured is left alone")
 
+    code, out, err = with_env(fake_healthy, ["--html"])
+    check(code == 64 and "--html requires --report" in err,
+          "--html without a report directory is a usage error, never a partial run")
+
     # --json is one document, with or without --report.
     jr_dir = tempfile.mkdtemp(prefix="properf-json-report-")
     try:
-        code, out, err = with_env(fake_healthy, ["--json", "--report", jr_dir])
+        code, out, err = with_env(fake_healthy, ["--json", "--report", jr_dir,
+                                                 "--html"])
         check(json.loads(out)["report_version"] == 4,
               "--json with --report prints one JSON document on stdout  "
               "<-- pinned defect")
         check("report :" in err and "report :" not in out,
               "and the report paths go to stderr")
-        check(len(os.listdir(jr_dir)) == 2, "while both files are written")
+        check(len(os.listdir(jr_dir)) == 3,
+              "TXT, JSON and the requested self-contained HTML are all written")
+        html_names = [name for name in os.listdir(jr_dir) if name.endswith(".html")]
+        check(len(html_names) == 1 and "PF-31" in io.open(
+                  os.path.join(jr_dir, html_names[0]), encoding="utf-8").read(),
+              "the CLI HTML includes the startup add-in diagnostic")
     finally:
         shutil.rmtree(jr_dir, ignore_errors=True)
 
@@ -9694,10 +10257,11 @@ def self_test():
           is None and fix_cache_aside(FakeEnv(), [], {}) is None,
           "a cache folder that is gone, or never named, is left alone  "
           "<-- pinned defect")
-    applied_sick = run(fake_sick(), opts_with(apply=True))["applied"]
-    check([r["result"] for r in applied_sick if r["id"] == "AP-02"][0]
-          .endswith("(previous: <none>)"),
-          "a graphics preference with no previous value says so in its result")
+    running_sick = fake_sick()
+    applied_sick = run(running_sick, opts_with(apply=True))["applied"]
+    check(applied_sick == [] and running_sick.written == [],
+          "with Pro running, --apply neither renames its cache nor writes a "
+          "graphics preference")
     check(decide_pro_running([])["dataloss"] is True
           and decide_pro_running(["x"])["dataloss"] is True,
           "DL-12 stays in the data-loss block when Pro is closed as well as "
@@ -9867,6 +10431,9 @@ def _parse(argv):
     ap.add_argument("--report", metavar="DIR",
                     help="write the text and JSON reports into this directory. "
                          "Without it no report files are written.")
+    ap.add_argument("--html", action="store_true",
+                    help="with --report, also write a self-contained HTML "
+                         "report beside the TXT and JSON")
     ap.add_argument("--sde-server", dest="sde_server", metavar="HOST",
                     help="TCP-probe this enterprise geodatabase host. Connect "
                          "only, no credential. Without it the probe is skipped.")
@@ -9902,6 +10469,9 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    if args.html and not args.report:
+        print("error: --html requires --report DIR.", file=sys.stderr)
+        return USAGE_ERROR
     if args.project_repair != "none" and not args.project:
         print("error: --project-repair requires --project APRX.",
               file=sys.stderr)
@@ -9975,11 +10545,21 @@ def main(argv=None):
             print("error: could not write the report: %s" % exc,
                   file=sys.stderr)
             return USAGE_ERROR
+        html_path = None
+        if args.html:
+            try:
+                html_path = write_html_report(document, json_path, args.verbose)
+            except (ImportError, OSError, IOError, ValueError, TypeError) as exc:
+                print("error: could not write the HTML report: %s" % exc,
+                      file=sys.stderr)
+                return USAGE_ERROR
         # With --json, stdout is one document and nothing else.
         out = sys.stderr if args.json else sys.stdout
         print("", file=out)
         print("  report : %s" % text_path, file=out)
         print("  report : %s" % json_path, file=out)
+        if html_path:
+            print("  report : %s" % html_path, file=out)
         if document.get("analysis_type") == "project":
             print("  Comparez ce JSON avec celui d'une copie saine du projet "
                   "pour isoler la différence.", file=out)
@@ -10961,7 +11541,7 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 
 # ============================================================================
 # 3/3  ArcGIS Pro toolbox glue
-# source: toolbox_glue.py  (sha256:9a95f3f43878)
+# source: toolbox_glue.py  (sha256:9b8784c4dacf)
 # ----------------------------------------------------------------------------
 # r"""The ArcGIS Pro glue: two geoprocessing tools over the diagnostic engine
 # and the HTML renderer.
@@ -11002,8 +11582,10 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 # without leaving the application, and it says so on the page.
 #
 # Nothing here signs in to anything and no host is contacted unless you name one.
-# Machine state changes only through the explicit workstation-fix switch or an
-# explicit selected-project recovery mode; the latter writes a new copy only.
+# The in-Pro workstation tool never changes machine state: AP-01 belongs to the
+# command-line run with Pro closed, and the former AP-02 GPU change is retired.
+# Only an explicit selected-project recovery mode can write here, and it writes
+# a new copy only.
 # ============================================================================
 
 import os
@@ -11356,41 +11938,37 @@ class Diagnose(object):
                "l'ouverture échoue.</p>")
 
         apply_fixes = arcpy.Parameter(
-            displayName="Appliquer les correctifs (renomme le cache, épingle "
-                        "le choix de carte graphique)",
+            displayName="Correctifs du poste (indisponibles dans ArcGIS Pro)",
             name="apply_fixes",
             datatype="GPBoolean",
             parameterType="Optional",
             direction="Input")
         apply_fixes.value = False
-        apply_fixes.category = "Modifie la machine"
+        # Keep the parameter for compatibility with existing models, but never
+        # let this in-Pro entry point mutate the application that hosts it.
+        apply_fixes.enabled = False
+        apply_fixes.category = "Lecture seule dans ArcGIS Pro"
         hinted(apply_fixes,
-               "SEUL paramètre qui modifie la machine. Décoché, l'outil est en "
-               "lecture seule.",
-               "<p><b>À quoi ça sert</b> : c'est l'interrupteur entre « lire » "
-               "et « réparer ». Tant qu'il est décoché, l'outil ne fait que "
-               "lire la machine et n'y change rien.</p>"
-               "<p><b>Défaut</b> : <b>décoché</b>.</p>"
-               "<p>Cochez-le et <b>deux correctifs seulement</b> s'appliquent, "
-               "chacun uniquement si son propre contrôle l'a justifié :</p>"
-               "<ul>"
-               "<li><b>AP-01</b> renomme le dossier de cache ESRI en lui "
-               "ajoutant un suffixe <code>.properf-&lt;date&gt;</code>. "
-               "<b>Rien n'est supprimé</b> : l'ancien dossier reste sur le "
-               "disque et Pro en reconstruit un neuf. Refusé depuis Pro, parce "
-               "que Pro tient ce dossier.</li>"
-               "<li><b>AP-02</b> épingle ArcGIS Pro sur la carte graphique "
-               "hautes performances, en écrivant la préférence pour "
-               "<code>ArcGISPro.exe</code> dans <code>HKCU</code> uniquement "
-               "— jamais dans la ruche machine, donc sans droit "
-               "administrateur.</li>"
-               "</ul>"
-               "<p><b>Chaque correctif appliqué affiche sa propre commande "
-               "d'annulation</b>, dans les messages et dans le rapport. "
-               "Copiez-la avant de fermer la fenêtre.</p>"
-               "<p><b>Exemple</b> : faites d'abord un passage <b>décoché</b>, "
-               "lisez le rapport, puis relancez coché seulement si AP-01 ou "
-               "AP-02 y figure comme proposé.</p>")
+               "Désactivé : le diagnostic dans ArcGIS Pro ne modifie jamais le "
+               "poste. Le correctif de cache se lance hors de Pro.",
+               "<p><b>À quoi ça sert</b> : ce paramètre historique est "
+               "conservé pour les modèles existants, mais il est "
+               "<b>désactivé</b>. Le diagnostic exécuté dans ArcGIS Pro est "
+               "toujours en lecture seule.</p>"
+               "<p><b>Défaut</b> : <b>décoché et désactivé</b>.</p>"
+               "<p><b>AP-01</b>, seul correctif de poste encore automatisé, "
+               "renomme le cache sans le supprimer et affiche sa commande "
+               "d'annulation. Il doit être lancé avec le script Python, "
+               "<b>ArcGIS Pro fermé</b>.</p>"
+               "<p><b>AP-02 est retiré</b> : forcer le GPU hautes performances "
+               "peut provoquer un crash au splash screen si son pilote est "
+               "instable. Si un ancien passage a appliqué AP-02, utilisez la "
+               "commande <code>undo</code> enregistrée dans son rapport JSON "
+               "pour restaurer exactement la valeur précédente.</p>"
+               "<p><b>Exemple</b> : laissez ce paramètre désactivé ici. Pour "
+               "un cache à reconstruire, fermez Pro et utilisez "
+               "<code>python arcgis_pro_performance_analyser.py --apply</code> "
+               "après avoir lu le diagnostic.</p>")
 
         html_out = arcpy.Parameter(
             displayName="Rapport HTML",
@@ -11438,12 +12016,12 @@ class Diagnose(object):
                     parameters[index].setErrorMessage(
                         "%r is not a host name: %s" % (host, problem))
         if parameters[8].value:
-            parameters[8].setWarningMessage(
-                "You are running this from inside ArcGIS Pro, so DL-12 reports "
-                "Pro as running and the cache fix (AP-01) is refused. Only the "
-                "GPU preference (AP-02) can apply. Both print their own undo "
-                "command, and neither deletes anything. Run arcgis_pro_performance_analyser.py from a "
-                "command prompt with Pro closed for the full set of fixes.")
+            parameters[8].setErrorMessage(
+                "Workstation fixes cannot run inside ArcGIS Pro. AP-01 must "
+                "run from a command prompt with Pro closed. The former AP-02 "
+                "GPU fix was retired because forcing an adapter can cause a "
+                "startup crash; use an older report's exact undo command if "
+                "that change needs to be reversed.")
         return
 
     def execute(self, parameters, messages):
@@ -11454,7 +12032,9 @@ class Diagnose(object):
             "sde_port": int(parameters[2].value or 1433),
             "portal": parameters[3].valueAsText or None,
             "timeout": int(parameters[4].value or 4000),
-            "apply": bool(parameters[8].value),
+            # Defence in depth: even a caller bypassing the disabled parameter
+            # and its validation cannot mutate the running Pro workstation.
+            "apply": False,
         }
         verbose = bool(parameters[5].value)
 

@@ -12,6 +12,7 @@ le poste où le fichier atterrit.
 
 | Fichier | Rôle |
 |---|---|
+| `Diagnostiquer_ArcGIS_Pro.bat` (à la racine) | Lanceur Windows en lecture seule, avec rapports TXT, JSON et HTML ; nécessite le moteur et le rendu à côté de lui |
 | `ArcGISPro_PerformanceAnalyser.pyt` | **L'artefact livré.** Deux outils, moteur et rendu inclus |
 | `arcgis_pro_performance_analyser.py` | Le moteur de diagnostic et sa ligne de commande. Sans `arcpy` |
 | `html_report.py` | Le rendu HTML. Fonction pure sur le document de rapport, sans `arcpy` |
@@ -42,6 +43,80 @@ module, parce que l'une masquerait l'autre silencieusement.
 C'est tout : il n'y a pas d'étape 4. Prérequis : ArcGIS Pro 3.x (Python 3.9+),
 bibliothèque standard uniquement.
 
+## Diagnostic par `.bat`, sans ouvrir ArcGIS Pro
+
+À la racine du dépôt, conservez ensemble ces trois fichiers :
+
+- `Diagnostiquer_ArcGIS_Pro.bat` ;
+- `arcgis_pro_performance_analyser.py` ;
+- `html_report.py`.
+
+**Double-cliquez sur `Diagnostiquer_ArcGIS_Pro.bat`.** Le lanceur recherche le
+Python d'ArcGIS Pro, puis `py -3` et `python` en secours. Il ne lance pas
+`ArcGISPro.exe`, ne charge aucun add-in et ne passe jamais `--apply`. Pour les
+contrôles de projets récents, ArcGIS Pro doit être fermé ; le diagnostic du
+splash screen et des packages de démarrage ne nécessite pas de l'ouvrir.
+
+Les rapports **TXT, JSON et HTML autonome** sont créés dans
+`%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports`. Le HTML s'ouvre à la
+fin ; le TXT est destiné au ticket support et le JSON au diff avec un autre
+passage. Pour choisir un autre dossier local :
+
+```bat
+Diagnostiquer_ArcGIS_Pro.bat "D:\Diagnostics\Poste"
+```
+
+La fenêtre reste ouverte et affiche le dossier ainsi que les erreurs de Python,
+de diagnostic ou d'écriture. Les codes 0 à 3 signifient que le diagnostic a
+terminé ; 1 et 2 signalent des constats à lire. Le code 64 signale un usage ou
+une écriture invalide. Le lanceur ne répare aucun projet et ne modifie ni le
+registre ni les add-ins.
+
+## Si ArcGIS Pro plante au splash screen, avant tout projet
+
+Un crash à ce stade ne justifie **pas** une récupération de `.aprx` : aucun
+projet n'a encore été ouvert. La simple présence de cette toolbox ne lance ni
+diagnostic ni correctif au démarrage. Procédez dans cet ordre, sans supprimer
+de projet, de géodatabase ou de profil :
+
+1. **Si une ancienne version a appliqué AP-02**, ouvrez le rapport JSON de ce
+   passage dans le dossier de sortie choisi. Dans `applied`, recherchez
+   l'objet `"id": "AP-02"` et exécutez dans l'invite de commandes la commande
+   exacte de sa propriété `undo`. Elle restaure la valeur précédente enregistrée
+   au moment du correctif. Le rapport **`.txt` du même passage** affiche aussi
+   cette commande après `undo   :`, sans les échappements du JSON : c'est le
+   texte le plus simple à copier. Ne remplacez pas cette commande par une
+   suppression générique du registre : une préférence antérieure peut devoir
+   être restaurée.
+2. **Testez sans les extensions tierces**, sans modifier la machine :
+   ```bat
+   "C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe" /disableaddins
+   ```
+   Si Pro démarre ainsi, les extensions/configurations de démarrage deviennent
+   la piste prioritaire, **sans désigner encore un package coupable**
+   ([procédure Esri](https://support.esri.com/en-us/knowledge-base/arcgis-pro-crashes-on-launch-after-installing-add-in-000036367)).
+3. **Lancez le diagnostic `.bat` ci-dessus.** PF-31 inventorie les add-ins,
+   configurations et plug-ins dans les emplacements par défaut/redirigés et les
+   dossiers HKCU/HKLM. Il compare `desktopVersion` à la version de Pro, relève
+   `autoLoad`, les assemblies absentes ou les copies d'assemblies Esri, et les
+   archives illisibles. DL-13 affiche le module fautif de l'événement
+   Application Error 1000 lorsqu'il existe ; sa présence dans un package est un
+   indice corrélé, pas une preuve automatique. Le rapport conserve aussi les
+   dumps, le GPU/pilote, les profils, la mémoire, le stockage et les autres
+   pistes de crash.
+4. **Si le crash persiste**, suivez le
+   [soft reset officiel Esri](https://support.esri.com/en-us/knowledge-base/how-to-perform-an-arcgis-pro-soft-reset-000027631) :
+   fermez toutes les applications ArcGIS, rendez d'abord toute licence
+   concurrente empruntée, puis **renommez** les profils `ArcGISPro` et
+   `ArcGISPro.exe_StrongName_*` sous `%APPDATA%\ESRI` et `%LOCALAPPDATA%\ESRI`
+   lorsqu'ils existent. Ne les supprimez pas : les copies `_old` permettent de
+   restaurer les réglages et favoris nécessaires.
+5. **Si Pro plante encore**, relevez dans l'Observateur d'événements Windows le
+   module défaillant de l'événement Application Error, la version exacte de Pro
+   et l'heure du crash. Ces éléments permettent de distinguer pilote graphique,
+   extension, profil et installation ; ne concluez pas à une cause sans cette
+   preuve.
+
 ## Les deux outils
 
 ### Diagnostiquer la lenteur d'ArcGIS Pro
@@ -65,24 +140,24 @@ suffisent, et aucun hôte ne sera contacté.
 | Détaillé | décoché | À cocher quand il faut **prouver** un résultat : ajoute la valeur attendue et la ligne brute lue |
 | Écrire aussi le rapport texte | coché | Le `.txt` est le format à coller dans un ticket |
 | Ouvrir le rapport HTML dans le navigateur | coché | À décocher dans un modèle ModelBuilder |
-| Appliquer les correctifs | **décoché** | **Seul paramètre qui modifie la machine.** Voir ci-dessous |
+| Correctifs du poste (indisponibles dans ArcGIS Pro) | **décoché et désactivé** | Paramètre historique conservé pour les modèles ; le diagnostic dans Pro reste toujours en lecture seule |
 
 Chaque paramètre porte une **infobulle** (le point d'interrogation) et un
 **paragraphe d'aide** dans le panneau d'aide de l'outil, avec son défaut et
 un exemple.
 
-**Si vous cochez « Appliquer les correctifs »**, deux correctifs seulement,
-et chacun seulement si son propre contrôle l'a justifié :
+**Le diagnostic exécuté dans ArcGIS Pro ne modifie plus le poste**, même si un
+ancien modèle force le paramètre historique `apply_fixes`. Le seul correctif de
+poste encore automatisé est **AP-01**, à lancer avec le script Python, **Pro
+fermé** : il renomme le dossier de cache ESRI en lui ajoutant
+`.properf-<date>`. **Rien n'est supprimé** et sa commande d'annulation est
+inscrite dans le rapport.
 
-- **AP-01** renomme le dossier de cache ESRI en lui ajoutant
-  `.properf-<date>`. **Rien n'est supprimé** : l'ancien dossier reste sur le
-  disque et Pro en reconstruit un neuf. Refusé depuis Pro, qui tient ce
-  dossier.
-- **AP-02** écrit la préférence « carte graphique hautes performances » pour
-  `ArcGISPro.exe`, dans `HKCU` uniquement.
-
-Chacun affiche **sa propre commande d'annulation** dans les messages et dans
-le rapport. Copiez-la avant de fermer la fenêtre.
+**AP-02 est retiré.** Les versions précédentes pouvaient forcer la préférence
+« carte graphique hautes performances » pour `ArcGISPro.exe`. Ce changement
+pouvait transformer un pilote instable en crash dès le splash screen. PF-11
+continue de mesurer et d'expliquer la préférence, mais ni `--apply` ni la
+boîte à outils ne la modifient.
 
 Le chemin du HTML est un **paramètre de sortie dérivé** : l'outil peut être
 enchaîné dans un modèle ModelBuilder.
@@ -169,7 +244,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 751 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 770 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -210,9 +285,10 @@ analyser un autre fichier pendant que Pro reste ouvert. Il refuse le projet
 actif et lit un instantané du fichier sélectionné ; il ne contourne pas la
 protection avec une ouverture `ArcGISProject` du projet endommagé.
 
-Rien ici ne s'authentifie nulle part, aucun hôte n'est contacté sauf ceux que
-vous nommez, et rien ne change sur la machine tant que « Apply the gated fixes »
-reste décoché.
+Rien ici ne s'authentifie nulle part et aucun hôte n'est contacté sauf ceux que
+vous nommez. Le diagnostic de poste exécuté dans Pro est **toujours en lecture
+seule** ; seule la récupération explicitement choisie pour un `.aprx` externe
+peut écrire, et elle crée une nouvelle copie sans toucher à l'original.
 
 ## Le rapport HTML
 
@@ -297,7 +373,7 @@ payload.
 **Chaque contrôle du rapport cite ses sources**, dans un bloc « Sources » placé
 sous sa propre correction. Ce ne sont pas des notes de bas de page réunies à la
 fin : la référence est à côté du problème qu'elle appuie, pour que vous puissiez
-la vérifier avant d'agir. 38 des 39 contrôles en portent ; **DL-00** (qui lance
+la vérifier avant d'agir. 39 des 40 contrôles en portent ; **DL-00** (qui lance
 l'outil) n'en a pas, parce qu'aucune source honnête ne le concerne — et un
 contrôle sans source honnête n'en reçoit pas d'inventée.
 
@@ -323,6 +399,7 @@ ce que chacun apporte réellement ici.
 | Source | Ce qu'on y prend |
 |---|---|
 | [Configuration système requise pour ArcGIS Pro](https://doc.esri.com/fr/arcgis-pro/latest/get-started/arcgis-pro-system-requirements.html) — **chiffres publiés par Esri** (3.7, et la version 3.6 en anglais) | **Processeur** : minimum 2 cœurs avec multithreading simultané, recommandé 4, optimal 10 (**PF-28**). **Mémoire** : minimum 8 Go, recommandé 32, optimal 64 (**PF-12**). **Stockage** : 32 Go libres au minimum, sur SSD en recommandé, et le cache de visualisation seul peut prendre jusqu'à 32 Go (**PF-13**, **PF-06**). **Carte graphique** : discrète (non intégrée) recommandée, 8 Go de mémoire dédiée, et « utilisez le dernier pilote disponible » (**PF-29**, **PF-11**). **OneDrive et Google Drive ne sont pas pris en charge** (**DL-05**, **DL-06**, **DL-07**). Certains outils de géotraitement exigent un processeur AVX, et la recherche d'outils exige AVX2 |
+| [Gérer les add-ins](https://pro.arcgis.com/en/pro-app/latest/get-started/manage-add-ins.htm), [emplacements et ordre de chargement](https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/conceptdocs/docs/ProConcepts-Advanced-Topics.html), [diagnostic des add-ins](https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/conceptdocs/docs/ProGuide-Diagnosing-ArcGIS-Pro-Add-ins.html) | Dossiers bien connus par défaut/redirigés et HKCU/HKLM, configurations et plug-ins, chargement `autoLoad`, règles `desktopVersion` et `defaultAssembly` (**PF-31**) ; `/disableaddins` comme test d'isolement, sans identifier à lui seul le package responsable |
 | [Settings that affect data access performance](https://doc.esri.com/en/arcgis-pro/latest/get-started/layer-map-project-perf-optimization.html) — documentation officielle ArcGIS Pro 3.7 | Reprojection à la volée quand les données ne sont pas dans la même référence spatiale (PF-01) ; coût des jointures et des requêtes de définition non sélectives (PF-14) ; poids des étiquettes et des `feature weights` (PF-14) ; intérêt des plages d'échelle de visibilité |
 | [Troubleshooting Performance Issues in ArcGIS Pro](https://community.esri.com/t5/arcgis-pro-documents/troubleshooting-performance-issues-in-arcgis-pro/ta-p/1025516) — Esri Community | Pilote de carte graphique à prendre chez le fabricant ; antivirus à écarter temporairement pour isoler la cause (PF-17) ; `WARP` dans le readout = Pro émule la carte graphique sur le processeur ; historique de géotraitement stocké dans le `.aprx` (PF-10) ; ne garder ouverts que les cartes et mises en page utiles (PF-10) |
 | [Why is ArcGIS Pro so slow?](https://community.esri.com/t5/arcgis-pro-questions/why-is-arcgis-pro-so-slow/td-p/508005/page/5) — Esri Community | Renommer les dossiers `ESRI` de `AppData\Local` et `AppData\Roaming` pour tester le cache (AP-01) ; autoriser `ArcGISPro.exe` dans le pare-feu Windows Defender ; latence réseau et données locales contre données en partage |
@@ -350,8 +427,8 @@ rapport le dit.
 ## Vérifier
 
 ```
-python tests/test_toolbox.py      # 129 assertions : rendu, deux outils et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 751 assertions sur le diagnostic
+python tests/test_toolbox.py      # 135 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
+python arcgis_pro_performance_analyser.py --self-test   # 770 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 

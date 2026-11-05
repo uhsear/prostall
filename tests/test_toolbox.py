@@ -473,8 +473,45 @@ check("<html lang=\"fr\">" in page,
 # =============================================================================
 
 print("-" * 70)
+print("the batch launcher is a read-only three-report entry point")
+batch = io.open(os.path.join(ROOT, "Diagnostiquer_ArcGIS_Pro.bat"),
+                encoding="utf-8").read()
+command_lines = [line for line in batch.splitlines()
+                 if line.startswith("%PYTHON% ")]
+check(len(command_lines) == 1
+      and '--report "%OUT%" --html --verbose' in command_lines[0],
+      "the launcher writes TXT, JSON and HTML in verbose mode")
+check(all("--apply" not in line and "ArcGISPro.exe" not in line
+          for line in command_lines),
+      "it neither enables a fix nor launches ArcGIS Pro")
+check("DisableDelayedExpansion" in batch and "chcp 65001" in batch
+      and "endlocal & exit /b %RC%" in batch,
+      "paths are handled safely and the diagnostic exit code reaches the caller")
+check("arcgispro-py3\\python.exe" in batch and "where py" in batch
+      and "where python" in batch and 'start "" "%LATEST%"' in batch,
+      "Pro's Python, fallbacks and the HTML report opening are all wired")
+
+print("-" * 70)
 print("the .pyt loads and its tools are what ArcGIS Pro will see")
 pyt = load_pyt()
+inline_dir = tempfile.mkdtemp(prefix="properf-inline-html-")
+inline_error = None
+inline_written = False
+real_html_module = sys.modules["html_report"]
+try:
+    sys.modules["html_report"] = None
+    inline_path = pyt.write_html_report(
+        document, os.path.join(inline_dir, "standalone.json"))
+    inline_written = os.path.isfile(inline_path)
+except Exception as exc:
+    inline_error = exc
+finally:
+    sys.modules["html_report"] = real_html_module
+    shutil.rmtree(inline_dir, ignore_errors=True)
+check(inline_error is None and inline_written
+      and os.path.basename(inline_path) == "standalone.html",
+      "the CLI HTML helper uses the renderer inlined in the .pyt, even when "
+      "the sibling module is unavailable")
 box = pyt.Toolbox()
 check(box.alias == "properf" and len(box.tools) == 2
       and box.tools == [pyt.Diagnose, pyt.AnalyzeProject],
@@ -497,9 +534,9 @@ check(names == ["output_folder", "sde_server", "sde_port", "portal", "timeout",
       "the parameter list is the CLI surface, plus the two the toolbox adds")
 check(params[9].direction == "Output" and params[9].parameterType == "Derived",
       "the HTML path is a derived output, so the tool can be chained")
-check(params[8].value is False,
-      "the fixes are off by default: a caller that never touches that "
-      "parameter cannot arm them")
+check(params[8].value is False and params[8].enabled is False,
+      "the legacy workstation-fix switch is off and disabled inside Pro: the "
+      "host application cannot be asked to modify its own startup settings")
 check(all((getattr(par, "helpMessage", "") or "").strip() for par in params),
       "every parameter carries a tooltip, so hovering the question mark "
       "answers what belongs in the box")
@@ -516,10 +553,11 @@ check("Laissez vide" in (params[1].parameterHelp or "")
       "both network probes say what leaving them empty does, because "
       "empty is the right answer for most runs and a blank box "
       "otherwise reads as something forgotten")
-check("Rien n'est supprimé" in (params[8].parameterHelp or "")
-      and "annulation" in (params[8].parameterHelp or ""),
-      "the one parameter that changes the machine says so, says nothing "
-      "is deleted, and says an undo is printed")
+check("désactivé" in (params[8].parameterHelp or "")
+      and "AP-02 est retiré" in (params[8].parameterHelp or "")
+      and "undo" in (params[8].parameterHelp or ""),
+      "the disabled legacy switch explains the cache-only CLI fix, why the "
+      "GPU change was retired, and where an older run's exact undo is stored")
 check(any(ord(c) > 127 for c in "".join(
           (par.helpMessage or "") + (par.parameterHelp or "") for par in params)),
       "the parameter help is written in accented French, not in French with "
@@ -551,9 +589,9 @@ fresh = pyt.Diagnose()
 p = fresh.getParameterInfo()
 p[8].value = True
 fresh.updateMessages(p)
-check(bool(p[8].warnings) and "AP-01" in p[8].warnings[0],
-      "enabling the fixes from inside Pro warns that the cache fix is "
-      "refused, because Pro is the thing that is running")
+check(bool(p[8].errors) and "AP-02" in p[8].errors[0],
+      "a caller that forces the legacy switch gets a validation error; no "
+      "workstation fix, especially the retired GPU change, can run inside Pro")
 
 print("-" * 70)
 print("the toolbox's own execute, end to end")
@@ -597,16 +635,29 @@ try:
           "silently overwriting the first")
     check(os.path.isfile(html_path), "and the first report is still there")
 
-    # The fixes stay off unless the parameter says otherwise.
+    # Even a legacy model or direct caller that bypasses the disabled widget
+    # cannot arm a workstation mutation in the hosting ArcGIS Pro process.
     p3 = fresh.getParameterInfo()
     p3[0].value = os.path.join(folder, "reports")
     p3[7].value = False
+    p3[8].value = True
+    seen_apply = []
+    real_read_run = pyt.run
+    def capture_read_run(env, opts):
+        seen_apply.append(opts.get("apply"))
+        return real_read_run(env, opts)
+    pyt.run = capture_read_run
     m3 = _Messages()
-    fresh.execute(p3, m3)
+    try:
+        fresh.execute(p3, m3)
+    finally:
+        pyt.run = real_read_run
     applied = [l for l in m3.warn if l.startswith("APPLIED")]
-    check(not applied, "with the fixes unticked, nothing was applied")
+    check(not applied, "with the legacy fixes switch forced on, nothing was applied")
+    check(seen_apply == [False],
+          "execute itself passes apply=False, independently of parameter validation")
     check(any("fix gate:" in l for l in m3.info),
-          "and the gates still report what they would have done")
+          "and the read-only gates still report their refusals")
 
     # The messaging logic, against a run that does have act-first findings.
     # The document is the real one from the analyser's stand-in sick workstation;
