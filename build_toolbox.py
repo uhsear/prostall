@@ -92,15 +92,16 @@ engine and the renderer are inlined below. In ArcGIS Pro, Catalog pane >
 Toolboxes > Add Toolbox, and point at this file. Two tools appear under
 "ArcGIS Pro Performance Analyser":
 
-  * Diagnose ArcGIS Pro slowness - the workstation diagnostic, written out as
-    HTML, JSON and text, with the HTML opened in the default browser.
-  * Verify the analyser - the engine's own offline assertions, for checking
-    that the build you were given still passes them.
+  * Diagnostiquer la lenteur d'ArcGIS Pro - the workstation diagnostic,
+    written out as HTML, JSON and text, with the HTML opened in the browser.
+  * Analyser un projet .aprx externe - an explicitly selected, non-active
+    project read through a snapshot, with an optional recovery COPY. Its
+    source is never rewritten.
 
 Read this before you trust the numbers
 --------------------------------------
-Running this from inside ArcGIS Pro means ArcGIS Pro is running, and that is
-not a detail:
+Running the workstation diagnostic from inside ArcGIS Pro means ArcGIS Pro is
+running, and that is not a detail:
 
   * DL-12 reports Pro as running, which is a data-loss finding in its own
     right and lands in the act-first list.
@@ -109,14 +110,17 @@ not a detail:
     fail, and this tool will not cause the failure it was run to explain.
   * AP-01, the cache fix, is refused for the same reason.
 
-So a run from inside Pro is a workstation report minus the project-file
-checks, and the report says so on the page. For the complete report, close Pro
-and run arcgis_pro_performance_analyser.py from a command prompt in the
-editor's own session.
+So a workstation run from inside Pro is a report minus the automatic
+project-file checks, and the report says so on the page. For that complete
+workstation report, close Pro and run arcgis_pro_performance_analyser.py from
+a command prompt in the editor's own session. The separate selected-project
+tool is the exception: it can analyse another .aprx while Pro stays open,
+because it snapshots that file and never opens it as the active project.
 
-Nothing here signs in to anything, no host is contacted unless you name one,
-and no machine state changes unless you tick "Apply the gated fixes". Every
-applied change prints its own undo command, and nothing deletes anything.
+Nothing here signs in to anything and no host is contacted unless you name one.
+Workstation changes require "Apply the gated fixes"; project recovery requires
+its own explicit mode and writes only a new copy. Every change reports how to
+go back, and no original project or source data is deleted.
 
 Provenance
 ----------

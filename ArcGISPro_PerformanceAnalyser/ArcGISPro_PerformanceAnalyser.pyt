@@ -18,15 +18,16 @@ engine and the renderer are inlined below. In ArcGIS Pro, Catalog pane >
 Toolboxes > Add Toolbox, and point at this file. Two tools appear under
 "ArcGIS Pro Performance Analyser":
 
-  * Diagnose ArcGIS Pro slowness - the workstation diagnostic, written out as
-    HTML, JSON and text, with the HTML opened in the default browser.
-  * Verify the analyser - the engine's own offline assertions, for checking
-    that the build you were given still passes them.
+  * Diagnostiquer la lenteur d'ArcGIS Pro - the workstation diagnostic,
+    written out as HTML, JSON and text, with the HTML opened in the browser.
+  * Analyser un projet .aprx externe - an explicitly selected, non-active
+    project read through a snapshot, with an optional recovery COPY. Its
+    source is never rewritten.
 
 Read this before you trust the numbers
 --------------------------------------
-Running this from inside ArcGIS Pro means ArcGIS Pro is running, and that is
-not a detail:
+Running the workstation diagnostic from inside ArcGIS Pro means ArcGIS Pro is
+running, and that is not a detail:
 
   * DL-12 reports Pro as running, which is a data-loss finding in its own
     right and lands in the act-first list.
@@ -35,27 +36,30 @@ not a detail:
     fail, and this tool will not cause the failure it was run to explain.
   * AP-01, the cache fix, is refused for the same reason.
 
-So a run from inside Pro is a workstation report minus the project-file
-checks, and the report says so on the page. For the complete report, close Pro
-and run arcgis_pro_performance_analyser.py from a command prompt in the
-editor's own session.
+So a workstation run from inside Pro is a report minus the automatic
+project-file checks, and the report says so on the page. For that complete
+workstation report, close Pro and run arcgis_pro_performance_analyser.py from
+a command prompt in the editor's own session. The separate selected-project
+tool is the exception: it can analyse another .aprx while Pro stays open,
+because it snapshots that file and never opens it as the active project.
 
-Nothing here signs in to anything, no host is contacted unless you name one,
-and no machine state changes unless you tick "Apply the gated fixes". Every
-applied change prints its own undo command, and nothing deletes anything.
+Nothing here signs in to anything and no host is contacted unless you name one.
+Workstation changes require "Apply the gated fixes"; project recovery requires
+its own explicit mode and writes only a new copy. Every change reports how to
+go back, and no original project or source data is deleted.
 
 Provenance
 ----------
-  arcgis_pro_performance_analyser.py        8754 lines  sha256:801b6e898dfb
-  html_report.py                             890 lines  sha256:beb3f3098f4f
-  toolbox_glue.py                            510 lines  sha256:081b144a742d
+  arcgis_pro_performance_analyser.py        9931 lines  sha256:268bc367fb28
+  html_report.py                             966 lines  sha256:184c9b6eaf73
+  toolbox_glue.py                            869 lines  sha256:9a95f3f43878
 """
 
 from __future__ import print_function
 
 # ============================================================================
 # 1/3  diagnostic engine
-# source: arcgis_pro_performance_analyser.py  (sha256:801b6e898dfb)
+# source: arcgis_pro_performance_analyser.py  (sha256:268bc367fb28)
 # ----------------------------------------------------------------------------
 # r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 #
@@ -76,20 +80,24 @@ from __future__ import print_function
 # this fills, from the outside, before the case is opened.
 #
 # Check by default. A plain run reads and prints. --apply is the only path that
-# changes machine state, every applied change prints its own undo, and nothing
-# here deletes anything. The network probes are opt-in: without --sde-server and
-# --portal no host is contacted. The one exception is a project folder that
-# already lives on a share: reading it crosses the network, as Pro does when it
-# opens the project, and PF-03 times one listing of it.
+# changes workstation settings, while --project-repair writes only a separately
+# verified recovery copy and never rewrites the selected source. Every applied
+# change prints its own undo, and no original data is deleted. The network probes
+# are opt-in: without --sde-server and --portal no host is contacted. The one
+# exception is a project folder that already lives on a share: reading it crosses
+# the network, as Pro does when it opens the project, and PF-03 times one listing
+# of it. Selected-project data sources are never contacted.
 #
 #     python arcgis_pro_performance_analyser.py --self-test
 #     python arcgis_pro_performance_analyser.py
 #     python arcgis_pro_performance_analyser.py --sde-server gisdb01 --portal gis.example.org --verbose
 #     python arcgis_pro_performance_analyser.py --report C:\Temp\properf
+#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx
+#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx --project-repair views
 #     python arcgis_pro_performance_analyser.py --apply
 #
-# Exit codes: 0 nothing to act on, 1 performance findings only, 2 at least one
-# finding bearing on lost edits, 3 no finding but nothing was determined either,
+# Exit codes: 0 nothing to act on, 1 measured findings without lost-edit impact,
+# 2 at least one finding bearing on lost edits, 3 no finding but nothing was determined either,
 # 64 usage error or a report that could not be written.
 #
 # The __main__ guard is dropped: ArcGIS Pro imports this file, it does not run it.
@@ -160,13 +168,15 @@ SYMPTOMS = (
            "redessine pas"),
     ("S5", "un copier ou coller d'entite ne fait rien pendant plusieurs "
            "secondes, et les tentatives suivantes le dupliquent"),
+    ("S6", "ArcGIS Pro se ferme ou le projet plante pendant son ouverture"),
 )
 
 # Report format version. Bumped when the JSON shape changes, so a diff against
 # an older report from a known-good workstation fails loudly instead of quietly.
 # 2 adds the kpi mapping on the checks that measure a number, which is what the
-# HTML report draws its gauges from.
-REPORT_VERSION = 3
+# HTML report draws its gauges from. 4 adds structured French remediation and
+# the selected-project report; older readers can still ignore the new fields.
+REPORT_VERSION = 4
 
 # Thresholds, named here rather than buried at the call site.
 SDE_LATENCY_WARN_MS = 250       # a LAN SQL host answers far inside this
@@ -292,6 +302,21 @@ _ESRI_CA = ("Esri Canada - D&eacute;panner ArcGIS Pro comme un analyste du "
 _ESRI_PROJ = ("Esri Community - Vitesse d'un projet ArcGIS Pro",
               "https://community.esri.com/t5/arcgis-utility-network-questions/"
               "arcgis-pro-project-speed/td-p/1581320")
+_ESRI_RECOVERY = ("Esri - Ce qu'une sauvegarde de projet permet de r&eacute;cup&eacute;rer",
+                  "https://support.esri.com/en-us/knowledge-base/faq-what-is-"
+                  "recovered-when-an-arcgis-pro-project-file-a-000026957")
+_ESRI_PROJECT_FILES = ("Esri - Emplacements des projets et des donn&eacute;es",
+                       "https://pro.arcgis.com/en/pro-app/latest/get-started/"
+                       "project-files-data-and-pro.htm")
+_ESRI_CIM_PROJECT = ("Esri - CIMGISProject : vues et &eacute;tat de l'interface",
+                     "https://doc.esri.com/en/arcgis-pro/latest/sdk/"
+                     "api-reference/topic1836.html")
+_ESRI_PACKAGE_PROJECT = ("Esri - Empaqueter un projet, avec ou sans historique",
+                         "https://pro.arcgis.com/en/pro-app/latest/tool-reference/"
+                         "data-management/package-project.htm")
+_ESRI_GP_HISTORY = ("Esri Community - Nettoyage de l'historique dans GISProject.json",
+                    "https://community.esri.com/t5/arcgis-pro-ideas/"
+                    "schedule-gp-history-clean-up/idi-p/1370815")
 _ESRI_REQ = ("Esri - Configuration syst\u00e8me requise pour ArcGIS Pro "
              "(chiffres publi\u00e9s : minimum, recommand\u00e9, optimal)",
              "https://doc.esri.com/fr/arcgis-pro/latest/get-started/"
@@ -324,6 +349,12 @@ _R_SHUTS = ("r/gis - \u00ab it just shuts with no warning and no saving \u00bb",
             "performance_impressions/")
 
 SOURCES = {
+    "PR-01": [_ESRI_RECOVERY],
+    "PR-02": [_ESRI_RECOVERY, _ESRI_CIM_PROJECT],
+    "PR-03": [_ESRI_PROJECT_FILES, _ESRI_REQ],
+    "PR-04": [_ESRI_PROJECT_FILES],
+    "PR-05": [_ESRI_CIM_PROJECT],
+    "PR-06": [_ESRI_PACKAGE_PROJECT, _ESRI_GP_HISTORY],
     "DL-03": [_ESRI_PROJ],
     "DL-04": [_MS_NIC],
     "DL-05": [_ESRI_REQ, _R_ONEDRIVE, _R_ONEDRIVE2],
@@ -380,6 +411,21 @@ APRX_MAX_PROJECTS = 3
 APRX_MAX_ENTRIES = 300
 APRX_MAX_ENTRY_BYTES = 4 * 1024 ** 2
 APRX_MAX_BYTES = 32 * 1024 ** 2
+
+# The dedicated, explicitly selected-project reader takes a consistent local
+# snapshot and verifies every ZIP member. It has its own, still bounded, caps:
+# a real project with a large geoprocessing history must not become an
+# unbounded decompression job. A file beyond a cap is Info and is never
+# repaired; the report says how to reduce it through ArcGIS Pro instead.
+PROJECT_MAX_BYTES = 512 * 1024 ** 2
+PROJECT_MAX_ENTRIES = 5000
+PROJECT_MAX_EXPANDED_BYTES = 1024 ** 3
+PROJECT_JSON_MAX_ENTRY_BYTES = 64 * 1024 ** 2
+PROJECT_JSON_MAX_TOTAL_BYTES = 256 * 1024 ** 2
+PROJECT_HISTORY_WARN = 100
+PROJECT_HISTORY_WARN_BYTES = 10 * 1024 ** 2
+PROJECT_REPAIR_MODES = ("none", "repack", "views", "views_history")
+PROJECT_CHECK_IDS = ("PR-01", "PR-02", "PR-03", "PR-04", "PR-05", "PR-06")
 
 # A Pro user.config is a few kilobytes of XML. This ceiling is not about Pro:
 # it is about a file this tool did not write, in a folder OneDrive may sync
@@ -447,7 +493,8 @@ def _join(value):
 
 def make_check(cid, category, title, status, observed, expected="", impact="",
                fix="", autofixable=False, dataloss=False, detail="",
-               measured=True, kpi=None):
+               measured=True, kpi=None, explanation="", impact_fr="",
+               steps=None, verification=""):
     """Build one check record, or refuse.
 
     Four refusals, each one a defect somebody shipped:
@@ -483,6 +530,8 @@ def make_check(cid, category, title, status, observed, expected="", impact="",
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("%s carries a KPI %r that is not a number"
                                  % (cid, key))
+    if steps is not None and isinstance(steps, (str, bytes)):
+        raise ValueError("%s steps must be a sequence of separate actions" % cid)
     record = {
         "id": cid,
         "category": category,
@@ -496,6 +545,17 @@ def make_check(cid, category, title, status, observed, expected="", impact="",
         "autofixable": bool(autofixable),
         "detail": detail,
     }
+    # Structured, reader-facing remediation. The original impact/fix fields
+    # stay intact for compatibility and for the technical evidence; these four
+    # fields are what the French report and the geoprocessing messages show.
+    if explanation:
+        record["explanation"] = "%s" % explanation
+    if impact_fr:
+        record["impact_fr"] = "%s" % impact_fr
+    if steps:
+        record["steps"] = ["%s" % step for step in steps]
+    if verification:
+        record["verification"] = "%s" % verification
     if kpi:
         record["kpi"] = dict(kpi)
     return record
@@ -506,6 +566,251 @@ def add_check(checks, **kwargs):
     rec = make_check(**kwargs)
     checks.append(rec)
     return rec
+
+
+# Reader-facing remediation, independent of the technical evidence. A finding
+# says what was measured; this table explains what it means and the order in
+# which to act. The wording deliberately says "peut" where the check identifies
+# a contributing condition rather than proving the single cause of an incident.
+GUIDANCE_FR = {
+    "DL-00": (
+        "Les réglages ArcGIS Pro et plusieurs caches appartiennent au compte Windows. Un diagnostic lancé depuis un autre compte peut donc examiner le mauvais profil.",
+        "Les corrections par utilisateur risquent de ne produire aucun effet pour la personne qui subit les lenteurs.",
+        ["Fermez ArcGIS Pro.", "Ouvrez une session Windows avec le compte qui rencontre le problème, sans élévation inutile.", "Relancez le diagnostic depuis cette session."],
+        "DL-00 doit être Conforme et le compte affiché doit être celui de l'utilisateur concerné."),
+    "DL-05": (
+        "Le projet ou ses données de travail sont sur un partage réseau ou dans un dossier synchronisé. Chaque ouverture et chaque enregistrement dépendent alors d'un verrou, d'une latence ou d'une synchronisation externe.",
+        "Ouverture et enregistrement plus lents, blocages pendant une sauvegarde et, en cas de coupure, risque d'enregistrement incomplet ou de version d'édition incohérente.",
+        ["Terminez et enregistrez les éditions dans ArcGIS Pro, puis fermez le projet.", "Copiez le projet et ses géodatabases fichier vers un dossier local non synchronisé, par exemple C:\\GIS\\Travail.", "Conservez les connexions d'entreprise nécessaires, mais évitez de modifier directement une géodatabase fichier sur le partage.", "Ouvrez la copie locale et faites un test d'enregistrement avant de reprendre la production."],
+        "Relancez DL-05 : le projet actif doit être LOCAL. Testez aussi une ouverture puis un enregistrement sans coupure."),
+    "DL-03": (
+        "La sauvegarde de projet copie le fichier .aprx ; elle ne sauvegarde pas les éditions d'entités. Un intervalle court peut aussi provoquer des écritures périodiques.",
+        "Des pauses pendant le travail et une fausse impression de protection : une sauvegarde .aprx ne restaure pas des modifications d'entités perdues.",
+        ["Dans ArcGIS Pro, ouvrez Projet > Options > Général > Récupération de projet.", "Sur un dossier réseau, augmentez l'intervalle ou désactivez temporairement ces sauvegardes pour isoler les pauses.", "Continuez à enregistrer explicitement les éditions d'entités ; ne comptez jamais sur la récupération du .aprx pour cela."],
+        "Vérifiez qu'une sauvegarde projet ne coïncide plus avec les pauses et confirmez séparément que les éditions sont bien enregistrées."),
+    "DL-04": (
+        "Windows est autorisé à éteindre une carte réseau pour économiser l'énergie. La reconnexion n'est pas toujours transparente pour une session de géodatabase déjà ouverte.",
+        "Perte momentanée de connexion, carte figée et échec possible lors de l'enregistrement d'une session d'édition.",
+        ["Faites sauvegarder et fermer les sessions ArcGIS Pro.", "Ouvrez Gestionnaire de périphériques > Cartes réseau > la carte concernée > Gestion de l'alimentation.", "Décochez « Autoriser l'ordinateur à éteindre ce périphérique pour économiser l'énergie » avec un administrateur si la stratégie de votre organisation l'autorise.", "Branchez le câble réseau ou reconnectez le VPN, puis rouvrez le projet."],
+        "Relancez DL-04 et vérifiez qu'aucune coupure n'apparaît dans le journal pendant une session d'édition."),
+    "DL-06": (
+        "Le dossier Documents est redirigé vers OneDrive par Known Folder Move. Un projet enregistré dans Documents peut donc être synchronisé sans que l'utilisateur l'ait explicitement choisi.",
+        "Rappels de fichiers, verrous et écritures concurrentes peuvent ralentir l'ouverture ou interrompre un enregistrement ArcGIS Pro.",
+        ["Fermez ArcGIS Pro et attendez la fin de la synchronisation OneDrive.", "Créez un dossier local hors Documents synchronisé, par exemple C:\\GIS\\Travail.", "Déplacez une copie du projet et des données de travail vers ce dossier ; ne désactivez pas brutalement la synchronisation pendant une édition.", "Si la redirection est imposée, demandez au service informatique une exclusion ou un emplacement GIS local pris en charge."],
+        "Le chemin du projet ne doit plus passer par OneDrive et DL-06/DL-05 ne doit plus signaler le dossier de travail."),
+    "DL-07": (
+        "Des fichiers du projet sont des espaces réservés OneDrive déshydratés : leur contenu doit être téléchargé avant qu'ArcGIS Pro puisse les exploiter.",
+        "Attentes à l'ouverture ou au dessin, voire échec d'accès si le fichier est rappelé pendant une écriture.",
+        ["Fermez le projet dans ArcGIS Pro.", "Dans l'Explorateur, vérifiez que l'espace disque disponible permet de télécharger les fichiers.", "Pour un dépannage ponctuel, choisissez « Toujours conserver sur cet appareil » sur le dossier concerné et attendez la fin du téléchargement.", "Pour un usage régulier, déplacez ensuite le projet hors du dossier synchronisé."],
+        "Les icônes de nuage doivent avoir disparu et DL-07 ne doit plus trouver de fichier déshydraté."),
+    "DL-08": (
+        "Le cache Fichiers hors connexion (CSC) peut servir une copie locale ou différer des écritures sur un partage. Ce comportement est incompatible avec une géodatabase fichier activement modifiée.",
+        "Lecture d'une ancienne version, conflits différés et modifications qui semblent disparaître après une reconnexion.",
+        ["Fermez ArcGIS Pro et laissez le Centre de synchronisation terminer ou résoudre les conflits existants.", "Sauvegardez les données avant de changer la configuration.", "Avec le service informatique, désactivez Fichiers hors connexion pour les partages GIS ou excluez ces partages par stratégie.", "Reprenez le travail depuis une copie locale plutôt que depuis le cache."],
+        "Vérifiez dans le Centre de synchronisation qu'il ne reste ni conflit ni écriture en attente, puis relancez DL-08."),
+    "DL-09": (
+        "Des vidages mémoire de plantage ArcGIS Pro ont été trouvés. Ils prouvent un incident à une date donnée, mais ne désignent pas à eux seuls le composant fautif.",
+        "Ils aident à corréler le crash avec une ouverture, une mise en page, un pilote ou une édition ; leur suppression ferait perdre une preuve utile au support.",
+        ["Notez la date du vidage et l'action réalisée à ce moment.", "Conservez les fichiers .dmp et le numéro de build indiqué par PF-04.", "Corrélez-les avec DL-13, PF-29 et, pour un seul projet, le diagnostic .aprx.", "Joignez les plus récents à un incident Esri au lieu de les supprimer."],
+        "Le rapport d'incident doit relier chaque crash à une heure et à une action reproductible."),
+    "DL-10": (
+        "La connexion TCP au serveur de géodatabase est lente, refusée ou interrompue. Si le nom ne se résout pas, le rapport le distingue explicitement d'un serveur qui répond mal.",
+        "Cartes lentes à charger, requêtes qui se figent et délais d'attente pendant l'enregistrement d'éditions d'entreprise.",
+        ["Vérifiez que le nom d'hôte et le port sont ceux du fichier de connexion, sans coller d'URL.", "Testez sur une liaison filaire et avec le VPN requis par l'organisation.", "Si le port est refusé, faites vérifier le service de base de données et le pare-feu par les équipes réseau/base de données.", "Si la latence reste élevée, fournissez la mesure et l'heure du test à ces équipes ; ne modifiez pas les données pour compenser."],
+        "Répétez DL-10 plusieurs fois : la connexion doit aboutir avec une latence stable et adaptée à votre réseau."),
+    "DL-11": (
+        "De nombreuses connexions .sde ou leurs copies dans l'index peuvent faire répéter l'énumération des connexions et des versions. Une connexion à la mauvaise version peut aussi donner l'impression que des éditions ont disparu.",
+        "Ouverture plus longue et risque de consulter ou modifier une version différente de celle attendue.",
+        ["Dans ArcGIS Pro, vérifiez d'abord la version utilisée par chaque couche d'entreprise.", "Fermez Pro et sauvegardez la liste des connexions réellement nécessaires.", "Retirez uniquement les connexions obsolètes identifiées ; ne diffusez pas leur contenu, qui peut contenir des identifiants.", "Si l'index est incohérent, faites reconstruire ResourceIndex après avoir fermé Pro."],
+        "Rouvrez le projet et confirmez la version et le serveur de chaque couche avant toute édition."),
+    "DL-12": (
+        "Ce résultat signifie surtout que le diagnostic de poste tourne pendant qu'ArcGIS Pro est ouvert ; ce n'est pas, à lui seul, une preuve de plantage ou de perte de données.",
+        "Le cache ne peut pas être renommé proprement et les contrôles automatiques des projets récents sont suspendus pour éviter un conflit d'enregistrement.",
+        ["Pour un diagnostic de poste complet, enregistrez les éditions, fermez les projets puis quittez ArcGIS Pro.", "Relancez le script ou appliquez AP-01 seulement à ce moment-là.", "Pour analyser un autre .aprx sans fermer Pro, utilisez le nouvel outil « Analyser un projet .aprx » et sélectionnez un fichier différent du projet actif."],
+        "DL-12 doit être Conforme pour le correctif de cache ; l'outil projet ciblé reste utilisable pendant que Pro est ouvert."),
+    "DL-13": (
+        "Le journal Windows contient des événements de plantage, de suspension, d'arrêt brutal ou de connectivité. Un événement donne une chronologie, pas automatiquement la cause racine.",
+        "Il permet de relier les fermetures ArcGIS Pro aux coupures réseau, aux pilotes et aux éditions signalées comme perdues.",
+        ["Relevez l'heure exacte et le type de chaque événement lié à ArcGISPro.exe.", "Comparez ces heures avec les vidages DL-09 et les actions décrites par l'utilisateur.", "Pour un événement 1000, relevez aussi le module défaillant ; pour un 1002, distinguez une attente d'une fermeture forcée.", "Transmettez ces éléments au support avec la version PF-04 plutôt que de vider le journal."],
+        "Une correction est validée si le même scénario ne produit plus d'événement et si les éditions restent présentes après réouverture."),
+    "PF-07": (
+        "Des dossiers temporaires d'anciennes sessions subsistent. Certains contiennent encore un projet ou une table non vide : ils peuvent être la seule piste de récupération.",
+        "Ils consomment du disque, mais leur suppression prématurée peut surtout détruire un travail non enregistré.",
+        ["Fermez ArcGIS Pro.", "Ouvrez d'abord les dossiers signalés comme contenant du travail et comparez leurs dates à l'incident.", "Copiez ailleurs tout élément à récupérer et vérifiez son ouverture.", "Seulement après cette revue, supprimez manuellement les dossiers anciens sans contenu utile."],
+        "Vérifiez que les éléments récupérés sont ouverts et enregistrés dans un projet normal avant tout nettoyage."),
+    "PF-01": (
+        "Des couches utilisent un système de coordonnées différent de celui de la carte. ArcGIS Pro doit alors les reprojeter à la volée lors des affichages.",
+        "Calculs supplémentaires à chaque ouverture, déplacement ou zoom ; ce réglage ralentit le dessin sans être une corruption du projet.",
+        ["Dans les propriétés de la carte, notez son système de coordonnées.", "Dans les propriétés de source des couches signalées, identifiez celles qui utilisent un autre système.", "Choisissez le système adapté au projet, puis utilisez l'outil Projeter sur une copie des données concernées.", "Remplacez la source de la couche par la copie projetée après avoir contrôlé son emplacement et ses entités."],
+        "Relancez PF-01 et comparez le temps de dessin ; ne reprojetez jamais directement une source en cours d'édition."),
+    "PF-02": (
+        "La configuration SMB du client n'est pas optimale pour les projets qui résident sur un partage. Elle est sans effet sur un projet entièrement local.",
+        "Débit et latence moins favorables lors des nombreuses petites lectures/écritures d'un projet ou d'une géodatabase réseau.",
+        ["Vérifiez d'abord si le projet est réellement sur un partage ; si non, passez aux autres causes.", "Comparez la configuration avec un poste qui fonctionne et avec la stratégie de l'organisation.", "Faites modifier SMB Multichannel par l'équipe système/réseau si nécessaire.", "Pour les éditions intensives, privilégiez tout de même un stockage de travail local."],
+        "Relancez PF-02 et PF-03 sur le même partage et comparez les temps de listage."),
+    "PF-03": (
+        "Le simple listage d'un dossier de projet réseau est lent ou impossible. ArcGIS Pro répète ce type d'accès pendant l'ouverture.",
+        "Attente avant même l'affichage de la carte, pauses lors de la résolution des sources et échecs si le partage devient inaccessible.",
+        ["Testez le même dossier avec une liaison filaire et le VPN correctement connecté.", "Vérifiez l'espace et la charge du serveur de fichiers avec l'équipe réseau.", "Copiez le projet sur un disque local pour distinguer un problème de partage d'un problème de contenu.", "Si la copie locale s'ouvre normalement, faites traiter la latence du partage plutôt que de modifier les cartes."],
+        "PF-03 doit repasser sous les seuils indiqués sur plusieurs mesures, pas seulement une fois."),
+    "PF-04": (
+        "La version et le build déterminent les correctifs disponibles et le comportement du moteur de rendu. Un numéro ancien n'explique pas seul un problème, mais il est indispensable au diagnostic.",
+        "Un défaut déjà corrigé par Esri peut continuer à provoquer lenteurs ou fermetures si le correctif n'est pas installé.",
+        ["Relevez la version et le build exacts dans le rapport.", "Consultez les correctifs publiés pour cette version et les problèmes connus correspondant à votre symptôme.", "Sauvegardez un projet représentatif, puis installez le correctif validé par votre organisation.", "Si le problème est apparu juste après une mise à jour, signalez cette chronologie au support avant de rétrograder."],
+        "Après mise à jour, vérifiez le nouveau build et rejouez exactement le scénario qui échouait."),
+    "PF-05": (
+        "Les options de rendu influencent directement le travail demandé à la carte graphique. Un réglage incompatible avec le pilote peut dégrader l'affichage.",
+        "Dessin lent, artefacts, symboles qui ne se rafraîchissent pas ou fermeture lors de l'ouverture d'une vue graphique.",
+        ["Notez les valeurs actuelles avant toute modification.", "Ouvrez Projet > Options > Affichage et ne changez qu'un réglage à la fois.", "Mettez également le pilote à jour ou revenez à la version précédente si le problème coïncide avec une mise à jour.", "Redémarrez Pro et testez une copie du projet après chaque changement."],
+        "Le problème doit disparaître de façon reproductible ; conservez le réglage initial si le test n'apporte rien."),
+    "PF-06": (
+        "Le cache local ESRI est volumineux ou contient une forte proportion d'éléments anciens. Il peut être reconstruit ; ce n'est pas une sauvegarde de données métier.",
+        "Démarrage et dessin progressivement plus lents, avec parfois un affichage issu d'un cache incohérent.",
+        ["Enregistrez et fermez toutes les sessions ArcGIS Pro.", "Utilisez AP-01, ou renommez manuellement le dossier de cache indiqué au lieu de le supprimer.", "Relancez ArcGIS Pro et laissez-le reconstruire un cache neuf.", "Si le problème persiste, restaurez l'ancien dossier avec la commande d'annulation et poursuivez avec PF-29/PF-05."],
+        "Un nouveau dossier de cache doit être créé et le même projet doit s'ouvrir sans l'ancienne anomalie."),
+    "PF-08": (
+        "L'index de recherche peut parcourir des dossiers et des connexions réseau, ou contenir un état devenu incohérent.",
+        "Activité disque/réseau au démarrage et ralentissements pendant que le catalogue met son index à jour.",
+        ["Dans Projet > Options > Général > Index de recherche, désactivez l'indexation des connexions réseau non nécessaires.", "Excluez les dossiers qui ne doivent pas être parcourus.", "Si l'index reste incohérent, fermez Pro et faites-le reconstruire après avoir sauvegardé les éléments utiles.", "Laissez la première reconstruction se terminer avant de comparer les performances."],
+        "Observez qu'aucun parcours réseau inutile ne repart au démarrage et relancez PF-08."),
+    "PF-09": (
+        "Plusieurs couches proviennent de services HTTP/HTTPS. Leur affichage dépend du portail, du VPN et de la bande passante, même si le poste local est sain.",
+        "Attente à l'ouverture et à chaque déplacement ou zoom ; une couche indisponible peut bloquer la carte sans que le .aprx soit corrompu.",
+        ["Identifiez les couches de service listées et vérifiez le VPN/portail requis.", "Désactivez temporairement les fonds de carte en ligne pour mesurer leur contribution.", "Exportez les données de travail autorisées vers une géodatabase locale si vous devez les modifier intensivement.", "Conservez en ligne uniquement les services nécessaires et corrigez séparément ceux qui ne répondent plus."],
+        "Comparez l'ouverture avec les services désactivés, puis relancez PF-09 après simplification."),
+    "PF-10": (
+        "Le projet contient beaucoup de couches, de groupes imbriqués ou un historique volumineux. Une couche masquée reste présente dans le document.",
+        "Lecture, énumération et enregistrement du .aprx plus longs ; la mémoire nécessaire à l'ouverture augmente aussi.",
+        ["Faites une copie du projet avant de l'alléger.", "Séparez les cartes par métier et retirez de la copie les cartes, mises en page et couches inutilisées.", "Réduisez les groupements inutiles et l'historique de géotraitement conservé.", "Utilisez Enregistrer sous depuis ArcGIS Pro quand le projet s'ouvre encore ; sinon testez la copie de récupération proposée par l'outil projet."],
+        "Relancez PF-10 sur la copie et vérifiez que toutes les cartes nécessaires sont toujours présentes."),
+    "PF-11": (
+        "Windows ne désigne pas explicitement la carte graphique hautes performances pour ArcGISPro.exe, ou la préférence est illisible.",
+        "Sur un portable à deux GPU, Pro peut utiliser le circuit intégré et afficher plus lentement les cartes et scènes.",
+        ["Fermez ArcGIS Pro.", "Dans Windows, ouvrez Paramètres > Système > Affichage > Graphismes et sélectionnez ArcGISPro.exe.", "Choisissez Hautes performances, ou laissez AP-02 écrire cette préférence dans HKCU.", "Redémarrez Pro sur secteur et vérifiez le GPU réellement utilisé."],
+        "Relancez PF-11 et vérifiez dans les informations de rendu que le GPU attendu est utilisé."),
+    "PF-12": (
+        "La mémoire installée ou libre est insuffisante pour le projet et les autres applications. Windows compense alors par le fichier d'échange.",
+        "Ralentissements brutaux, longues pauses de disque et, sous forte pression mémoire, fermeture d'ArcGIS Pro.",
+        ["Fermez les applications gourmandes et les projets ArcGIS Pro inutiles.", "Vérifiez dans le Gestionnaire des tâches si la mémoire est saturée pendant l'ouverture.", "Allégez le projet si PF-10 le signale et gardez le fichier d'échange géré par Windows sur un disque local.", "Si le besoin dépasse durablement la mémoire disponible, augmentez la RAM selon les paliers Esri indiqués."],
+        "Répétez le scénario en surveillant la mémoire : le système ne doit plus passer son temps à paginer."),
+    "PF-13": (
+        "Un volume utilisé par Windows, le cache ou le projet manque d'espace libre.",
+        "Le cache et les fichiers temporaires ne peuvent plus grossir normalement ; enregistrements et géotraitement peuvent échouer ou se bloquer.",
+        ["Vérifiez le volume précis indiqué, pas seulement le disque C:.", "Libérez d'abord les fichiers sûrs et les anciennes sorties identifiées, sans supprimer les dossiers PF-07 qui contiennent du travail.", "Déplacez les données volumineuses vers un volume local adapté et videz la corbeille après vérification.", "Gardez une marge supérieure au seuil affiché avant de rouvrir le projet."],
+        "Relancez PF-13 et effectuez un enregistrement ainsi qu'un petit géotraitement sur le volume concerné."),
+    "PF-14": (
+        "Jointures, requêtes de définition, étiquettes et moteur Maplex multiplient les calculs à chaque rafraîchissement de carte.",
+        "Ouverture et dessin lents, requêtes répétées et délai avant que les attributs ou symboles ne se mettent à jour.",
+        ["Relevez les couches qui cumulent le plus de jointures et d'étiquettes.", "Matérialisez les jointures permanentes avec Joindre un champ ou une copie exportée.", "Ajoutez les index nécessaires sur les champs filtrés après validation par le propriétaire des données.", "Désactivez les étiquettes inutiles et utilisez des plages d'échelle pour éviter de dessiner toutes les couches en permanence."],
+        "Comparez le temps de rafraîchissement avant/après sur la même étendue et relancez PF-14."),
+    "PF-15": (
+        "Le mode d'alimentation actif peut limiter le processeur pour économiser l'énergie.",
+        "Traitements et dessin plus lents, surtout sur portable sur batterie ou pendant une longue ouverture.",
+        ["Branchez le portable sur secteur.", "Ouvrez les Options d'alimentation Windows et choisissez Performances élevées si votre organisation le permet.", "Si ce mode est masqué par stratégie, demandez au service informatique le réglage approprié plutôt que de modifier le registre.", "Relancez le même projet sans autre changement pour comparer."],
+        "PF-15 doit indiquer le mode attendu et le temps d'ouverture doit être comparé dans les mêmes conditions."),
+    "PF-16": (
+        "Des rasters n'ont pas de pyramides ou d'aperçus. ArcGIS Pro doit donc lire davantage de pixels pour produire une petite image à l'écran.",
+        "Affichage très lent à chaque zoom et forte lecture disque/réseau à l'ouverture de la carte.",
+        ["Vérifiez que les rasters sont accessibles et faites une copie de travail locale s'ils sont sur un partage.", "Exécutez l'outil Construire les pyramides sur les rasters signalés, hors session d'édition.", "Laissez les fichiers latéraux .ovr ou .aux.xml avec le raster.", "Rouvrez la carte à plusieurs échelles pour contrôler l'affichage."],
+        "PF-16 ne doit plus signaler ces rasters et le déplacement/zoom doit être nettement plus réactif."),
+    "PF-17": (
+        "Les exclusions Defender attendues par la politique de cet outil sont absentes ou illisibles. Cela ne prouve pas que l'antivirus est la cause et ne justifie jamais de le désactiver.",
+        "L'analyse à l'accès peut ralentir les nombreux petits fichiers d'ArcGIS Pro, mais de mauvaises exclusions réduisent aussi la sécurité.",
+        ["Mesurez d'abord avec l'outil d'analyse de performances Microsoft Defender, sans désactiver la protection.", "Fournissez les chemins réellement impliqués à l'équipe sécurité.", "Faites valider des exclusions minimales avec des chemins absolus du compte utilisateur ; évitez les variables résolues dans le mauvais profil.", "Refaites une mesure après application de la politique approuvée."],
+        "La preuve Defender doit montrer une baisse du temps d'analyse et PF-17 doit refléter la politique réellement appliquée."),
+    "PF-18": (
+        "Le projet, le cache ou l'espace temporaire se trouve sur un disque rotatif ou sur un média dont le type n'est pas confirmé.",
+        "Les nombreuses petites entrées/sorties d'ArcGIS Pro attendent le disque, ce qui rallonge ouverture, cache et géotraitement.",
+        ["Identifiez précisément quel volume contient le projet et le cache.", "Déplacez une copie du projet et des données de travail vers un SSD local.", "Redirigez le cache et l'espace de travail temporaire vers ce SSD depuis les options prises en charge.", "Comparez la même ouverture sans modifier le contenu du projet."],
+        "PF-18 doit identifier un SSD et PF-03/PF-13 doivent rester sains sur le nouveau volume."),
+    "PF-19": (
+        "La sonde du portail n'a pas été demandée, n'a pas résolu le nom, ou mesure une connexion lente/refusée selon la ligne affichée.",
+        "Connexion au portail et résolution des couches web plus lentes à l'ouverture ; un hôte non renseigné ne signifie aucun problème.",
+        ["Si le projet n'utilise aucun portail, ignorez cette sonde non mesurée.", "Sinon indiquez uniquement le nom DNS du portail, sans https:// ni chemin, puis relancez.", "Vérifiez le VPN, le DNS et le port 443 avec l'équipe réseau si la connexion échoue.", "Corrélez le résultat avec PF-09 pour identifier les couches concernées."],
+        "La sonde doit aboutir avec une latence stable et les services du projet doivent s'ouvrir dans un navigateur autorisé."),
+    "PF-20": (
+        "Le fichier d'échange est trop petit ou placé sur un volume réseau. Il sert d'appoint lorsque la mémoire physique est sous pression.",
+        "Ralentissements majeurs lors des pointes mémoire et fermetures possibles au lieu d'une simple pause.",
+        ["Ouvrez Système > Paramètres système avancés > Performances > Avancé > Mémoire virtuelle.", "Placez le fichier d'échange sur un volume local avec suffisamment d'espace.", "Préférez une taille gérée par le système sauf recommandation contraire de votre service informatique.", "Redémarrez Windows pour appliquer le changement."],
+        "Après redémarrage, relancez PF-20 et reproduisez la pointe mémoire avec PF-12 sous surveillance."),
+    "PF-21": (
+        "La carte réseau a négocié un débit inférieur à celui attendu, souvent à cause d'un câble, d'un dock ou d'un port de commutateur.",
+        "Les données d'entreprise et les services semblent lents même si les serveurs et ArcGIS Pro sont correctement configurés.",
+        ["Contrôlez le débit affiché pour la carte réellement utilisée.", "Remplacez ou rebranchez le câble et testez un autre port de commutateur.", "Sur portable, testez sans la station d'accueil et vérifiez l'alimentation du dock.", "Faites contrôler vitesse/duplex et erreurs du port par l'équipe réseau."],
+        "PF-21 doit afficher le débit attendu et DL-10/PF-03 doit être retesté sur cette même liaison."),
+    "PF-22": (
+        "Des couches se rafraîchissent automatiquement ou la géodatabase par défaut se trouve sur un stockage distant. Ces éléments provoquent des requêtes et écritures sans action visible de l'utilisateur.",
+        "Pauses périodiques, rafraîchissements de carte et lenteur des sorties de géotraitement ; une source indisponible peut aussi retarder l'ouverture.",
+        ["Dans les propriétés de chaque couche listée, désactivez ou augmentez l'intervalle de rafraîchissement si le métier ne l'exige pas.", "Vérifiez la disponibilité des sources avant de changer les couches.", "Dans les options du projet, définissez une géodatabase par défaut locale et existante.", "Enregistrez sous une copie puis testez l'ouverture et un petit géotraitement."],
+        "Relancez PF-22 : aucun minuteur inutile ne doit rester et la géodatabase par défaut doit être locale."),
+    "PF-26": (
+        "Le profil itinérant transporte une partie des réglages ESRI entre les sessions Windows.",
+        "Copies au démarrage/à la fermeture de session et premier lancement d'ArcGIS Pro plus lent ; les verrous réseau peuvent ajouter des pauses.",
+        ["Faites identifier par le service informatique les dossiers ESRI réellement itinérants.", "Excluez par stratégie les caches et éléments locaux qui n'ont pas besoin de suivre l'utilisateur.", "Conservez les paramètres métier nécessaires et testez sur un compte pilote.", "Ouvrez puis fermez deux sessions pour vérifier que le profil se synchronise correctement."],
+        "Mesurez le temps d'ouverture de session et relancez PF-26 sur le compte pilote."),
+    "PF-27": (
+        "Le comportement signalé concerne le rafraîchissement de la symbologie après un calcul de champ, pas nécessairement la valeur enregistrée.",
+        "La carte peut sembler obsolète alors que la table contient la bonne valeur ; il ne faut pas conclure trop vite à une perte de données.",
+        ["Vérifiez d'abord la nouvelle valeur directement dans la table attributaire.", "Rafraîchissez la carte ou fermez puis rouvrez la vue.", "Notez le build PF-04 et les étapes exactes qui reproduisent le problème.", "Transmettez un suivi Diagnostic Monitor à Esri si le comportement persiste."],
+        "La valeur doit rester correcte après réouverture et le rafraîchissement doit être vérifié séparément de l'enregistrement."),
+    "PF-28": (
+        "Le processeur est sous un palier mesuré ou son faible débit par cœur limite les opérations peu parallélisées d'ArcGIS Pro.",
+        "Dessin, ouverture et certains géotraitements restent lents même avec beaucoup de cœurs ; ce n'est pas un réglage de projet à réécrire.",
+        ["Fermez les applications qui consomment du CPU pendant le test.", "Appliquez le mode d'alimentation adapté PF-15 et branchez le portable.", "Vérifiez que les fonctions AVX requises sont présentes pour les outils concernés.", "Si le matériel reste sous les prérequis, prévoyez un remplacement en privilégiant les performances par cœur."],
+        "Comparez le même traitement à charge contrôlée et vérifiez que les prérequis Esri sont atteints."),
+    "PF-29": (
+        "Le pilote graphique est ancien, le GPU est intégré seulement, ou ArcGIS Pro utilise un rendu logiciel tel que WARP selon la mesure affichée.",
+        "Dessin très lent, artefacts et fermetures possibles à l'ouverture de cartes, scènes ou mises en page.",
+        ["Relevez le modèle du GPU, la date du pilote et le nom du module éventuellement indiqué dans DL-13.", "Installez le pilote du fabricant du GPU ou du portable validé pour votre version de Pro.", "Si les crashes ont commencé juste après une mise à jour, testez le retour au pilote précédent.", "Sur double GPU, appliquez aussi PF-11 ; sur GPU intégré seul, réduisez les scènes 3D et envisagez le matériel recommandé."],
+        "Vérifiez que WARP n'est plus utilisé et ouvrez plusieurs fois la même vue sans crash avant de reprendre la production."),
+    "PF-30": (
+        "Le dossier de données contient des géodatabases ou rasters volumineux, ou un très grand nombre de petits fichiers.",
+        "Parcours, synchronisation, sauvegarde et accès disque plus lents ; sur partage, chaque petit fichier ajoute de la latence.",
+        ["Repérez dans la preuve les dossiers qui portent réellement le volume ou le nombre de fichiers.", "Déplacez une copie de travail vers un SSD local non synchronisé.", "Construisez les pyramides nécessaires et retirez uniquement les anciennes sorties dont vous n'avez plus besoin.", "Pour les données partagées en édition, utilisez l'architecture de géodatabase validée par votre organisation plutôt qu'une copie concurrente."],
+        "Relancez PF-30 et mesurez l'ouverture depuis le nouvel emplacement sans changer les couches."),
+    "PR-01": (
+        "Le fichier sélectionné n'est pas une archive .aprx lisible et intègre, ou l'un de ses éléments a échoué au contrôle CRC. Le diagnostic distingue cette corruption d'un simple projet volumineux.",
+        "ArcGIS Pro peut refuser le projet ou se fermer pendant sa lecture. Une réparation automatique est refusée si tous les éléments ne peuvent pas être vérifiés.",
+        ["Ne tentez pas plusieurs enregistrements par-dessus le fichier d'origine.", "Restaurez d'abord une sauvegarde ou une version précédente datant d'avant l'incident.", "Si seule la structure ZIP est en cause mais que tous les éléments sont lisibles, essayez le mode « Reconstruire le conteneur » : il crée une nouvelle copie sans changer les documents.", "Si le rapport indique une erreur CRC ou une archive illisible, conservez le fichier et contactez le support avec la sauvegarde et le message exact."],
+        "Ouvrez la copie restaurée/reconstruite sur un poste de test et vérifiez cartes, mises en page, sources et historique avant de la remettre en production."),
+    "PR-02": (
+        "Un document JSON interne est absent, incomplet ou invalide. GISProject.json est indispensable à un projet Pro 3 ; les autres documents peuvent correspondre à une carte ou une mise en page précise.",
+        "Ouverture impossible ou crash lors du chargement de l'élément corrompu. Tant que la structure n'est pas entièrement validée, l'outil ne prétend pas la réparer.",
+        ["Conservez l'original et relevez le nom du document interne signalé.", "Restaurez une sauvegarde ArcGIS Pro ou une version précédente du fichier.", "Si le projet s'ouvre sur une autre machine avec la même version de Pro, utilisez immédiatement Enregistrer sous pour produire une nouvelle copie saine.", "Ne supprimez pas manuellement un document JSON sans connaître ses références ; transmettez le rapport au support si aucune sauvegarde n'est disponible."],
+        "PR-01 et PR-02 doivent être Conforme sur la nouvelle copie, puis chaque carte et mise en page doit être ouverte."),
+    "PR-03": (
+        "Le .aprx, son dossier principal ou sa géodatabase par défaut utilise un emplacement réseau ou synchronisé. C'est une condition de risque mesurée, pas la preuve unique d'un crash.",
+        "Lenteurs, attentes de verrou et échecs d'ouverture/enregistrement si le réseau ou la synchronisation interrompt les accès.",
+        ["Fermez le projet dans toutes les sessions ArcGIS Pro.", "Copiez le .aprx avec son dossier principal et sa géodatabase fichier vers un emplacement local en conservant leur arborescence relative.", "Vérifiez que les chemins relatifs continuent de fonctionner depuis la copie.", "Ouvrez cette copie locale et comparez le résultat avant de modifier le contenu du projet."],
+        "La copie locale doit s'ouvrir et s'enregistrer sans dépendre du partage, puis PR-03 doit être Conforme."),
+    "PR-04": (
+        "Une source fichier locale référencée par une couche est absente, ou des sources distantes doivent être vérifiées. Une couche cassée provoque normalement un point d'exclamation, pas nécessairement un crash.",
+        "Couches non affichées et attentes pendant la résolution des sources ; les services et connexions d'entreprise ne sont pas contactés par ce contrôle.",
+        ["Dans ArcGIS Pro, ouvrez la copie du projet et repérez les couches avec une source rompue.", "Utilisez Propriétés de la couche > Source > Définir la source de données pour retrouver le bon emplacement.", "Pour un chemin réseau, vérifiez d'abord VPN, partage et droits d'accès ; l'outil ne tente pas de s'y connecter.", "Ne remplacez pas une source par une table vide : vérifiez le nombre d'entités et la symbologie après reconnexion."],
+        "Toutes les couches nécessaires doivent s'afficher sans point d'exclamation et leurs propriétés doivent indiquer la bonne source."),
+    "PR-05": (
+        "Le projet enregistre les vues à rouvrir et l'état des volets. Si Pro se fermait sur une mise en page ou une scène qui provoque un crash, cette vue est rouverte immédiatement au lancement suivant.",
+        "Le même crash peut se répéter avant que vous ayez le temps de fermer la vue, alors que les cartes et mises en page elles-mêmes sont encore présentes.",
+        ["Choisissez « Copie sans vues au démarrage » dans l'outil projet ; l'original reste inchangé.", "Ouvrez la nouvelle copie : elle ne restaure pas les anciennes vues actives.", "Rouvrez ensuite les cartes une par une, puis les mises en pages une par une pour identifier l'élément qui déclenche le problème.", "Si une vue précise provoque le crash, vérifiez PF-29/PF-05 et les extensions tierces avant de la recréer dans une copie."],
+        "La copie doit s'ouvrir sans restaurer les anciens onglets ; vérifiez ensuite que toutes les cartes et mises en page figurent toujours dans le Catalogue."),
+    "PR-06": (
+        "L'historique de géotraitement est très volumineux selon les seuils de cet outil. Il est stocké dans GISProject.json et peut contenir de nombreux paramètres et messages.",
+        "Lecture du projet et consommation mémoire augmentent à l'ouverture ; l'historique n'est pas une sauvegarde des données produites.",
+        ["Si le projet s'ouvre, utilisez Enregistrer sous ou un paquetage sans historique après avoir conservé les opérations à rejouer.", "Sinon choisissez la copie de récupération « sans vues ni historique » dans l'outil.", "Vérifiez que les données de sortie existent indépendamment de l'historique.", "Conservez l'original si vous devez retrouver plus tard les paramètres d'un traitement."],
+        "PR-06 doit être Conforme sur la copie et les cartes/données doivent être intactes ; seul l'historique est retiré."),
+}
+
+
+def enrich_check(check):
+    """Attach the French explanation and ordered actions to one check."""
+    guidance = GUIDANCE_FR.get(check.get("id"))
+    if guidance:
+        explanation, impact_fr, steps, verification = guidance
+        check.setdefault("explanation", explanation)
+        check.setdefault("impact_fr", impact_fr)
+        check.setdefault("steps", list(steps))
+        check.setdefault("verification", verification)
+    return check
 
 
 def safe_check(checks, cid, category, title, body, dataloss=False):
@@ -591,8 +896,8 @@ ALWAYS_ANSWERING = ("DL-00", "DL-12")
 
 
 def exit_code(checks):
-    """0 clean, 1 performance findings only, 2 a finding bearing on lost edits,
-    3 no finding and nothing was measured either.
+    """0 clean, 1 measured findings without lost-edit impact, 2 a finding
+    bearing on lost edits, 3 no finding and nothing was measured either.
 
     3 exists because a wrapper reading the code cannot see the stderr note. A
     run that could read nothing (PowerShell blocked, a host that is not
@@ -2375,7 +2680,8 @@ def decide_aprx(pro_state, projects, omitted=0):
                "share pays the share on every geoprocessing write.",
         fix="Clear the refresh interval in the properties of each layer "
             "listed, and point the default geodatabase at a local "
-            "folder. This tool never writes the project file.",
+            "folder. This check never writes the project file; the separate "
+            "selected-project recovery mode only creates a new copy.",
         detail=("Not read in full: " + "; ".join(incomplete)) if incomplete
                else "Every project listed was read in full.")
 
@@ -4709,6 +5015,583 @@ def _mbps(speed):
 
 
 # =============================================================================
+# EXPLICITLY SELECTED .APRX PROJECT. A local snapshot, full bounded integrity
+# checks, then an optional recovery COPY. The source is never rewritten.
+# =============================================================================
+
+
+def _empty_project_inspection(path):
+    return {
+        "path": path, "size": None, "entries": 0, "texts": [],
+        "main": None, "main_name": None, "main_format": None,
+        "integrity": "Info", "integrity_reason": "not inspected",
+        "archive_opened": False, "read_complete": False,
+        "duplicates": [], "crc_errors": [], "read_errors": [],
+        "json_errors": [], "json_capped": [], "main_not_dict": False,
+    }
+
+
+def inspect_aprx_archive(path, display_path=None):
+    """Inspect one local .aprx snapshot without contacting its data sources.
+
+    Every non-directory ZIP member is streamed to EOF so its CRC is checked.
+    JSON documents are retained only inside explicit entry/total budgets. A
+    malformed archive is Fail; a file that exceeds a safety budget or cannot
+    be read is Info, because its content was not determined. No repair is
+    allowed from an Info integrity record.
+    """
+    import zipfile
+    import zlib
+
+    shown = display_path or path
+    out = _empty_project_inspection(shown)
+    if not shown or not str(shown).lower().endswith(".aprx"):
+        out["integrity_reason"] = ("le fichier sélectionné ne porte pas "
+                                   "l'extension .aprx")
+        return out
+    try:
+        stat = os.stat(path)
+        out["size"] = stat.st_size
+    except (OSError, IOError, ValueError) as exc:
+        out["integrity_reason"] = "lecture du fichier impossible: %s" % exc
+        return out
+    if stat.st_size == 0:
+        out["integrity"] = "Fail"
+        out["integrity_reason"] = "le fichier est vide (0 octet)"
+        return out
+    if stat.st_size > PROJECT_MAX_BYTES:
+        out["integrity_reason"] = (
+            "fichier de %s, au-delà de la limite de sécurité de %s; contenu "
+            "non mesuré" % (format_bytes(stat.st_size),
+                            format_bytes(PROJECT_MAX_BYTES)))
+        return out
+
+    try:
+        archive = zipfile.ZipFile(path)
+    except (OSError, IOError) as exc:
+        out["integrity_reason"] = "ouverture impossible: %s" % exc
+        return out
+    except (zipfile.BadZipfile, ValueError) as exc:
+        out["integrity"] = "Fail"
+        out["integrity_reason"] = "archive ZIP/APRX invalide: %s" % exc
+        return out
+
+    retained_json = 0
+    expanded = 0
+    with archive:
+        try:
+            infos = archive.infolist()
+        except (OSError, IOError, zipfile.BadZipfile, ValueError) as exc:
+            out["integrity"] = "Fail"
+            out["integrity_reason"] = "table des éléments ZIP invalide: %s" % exc
+            return out
+        out["archive_opened"] = True
+        out["entries"] = len(infos)
+        if len(infos) > PROJECT_MAX_ENTRIES:
+            out["integrity_reason"] = (
+                "%d éléments, au-delà de la limite de %d; contenu non mesuré"
+                % (len(infos), PROJECT_MAX_ENTRIES))
+            return out
+        declared = sum(max(0, info.file_size) for info in infos)
+        if declared > PROJECT_MAX_EXPANDED_BYTES:
+            out["integrity_reason"] = (
+                "taille décompressée déclarée de %s, au-delà de la limite de "
+                "%s; contenu non mesuré"
+                % (format_bytes(declared),
+                   format_bytes(PROJECT_MAX_EXPANDED_BYTES)))
+            return out
+        names = collections.Counter(info.filename for info in infos)
+        out["duplicates"] = sorted(name for name, count in names.items()
+                                   if count > 1)
+        if out["duplicates"]:
+            out["integrity"] = "Fail"
+            out["integrity_reason"] = (
+                "noms d'éléments dupliqués dans l'archive: %s"
+                % ", ".join(out["duplicates"][:10]))
+            return out
+
+        lower_names = [info.filename.lower() for info in infos]
+        if "gisproject.json" in lower_names:
+            out["main_format"] = "json"
+            out["main_name"] = infos[lower_names.index("gisproject.json")].filename
+        elif "gisproject.xml" in lower_names:
+            out["main_format"] = "xml"
+
+        for info in infos:
+            if info.filename.endswith("/"):
+                continue
+            if info.flag_bits & 0x1:
+                out["integrity"] = "Fail"
+                out["integrity_reason"] = (
+                    "élément chiffré non pris en charge: %s" % info.filename)
+                return out
+            chunks = []
+            got = 0
+            keep_json = info.filename.lower().endswith(".json")
+            try:
+                handle = archive.open(info, "r")
+                try:
+                    while True:
+                        block = handle.read(1024 * 1024)
+                        if not block:
+                            break
+                        got += len(block)
+                        expanded += len(block)
+                        if expanded > PROJECT_MAX_EXPANDED_BYTES:
+                            out["integrity_reason"] = (
+                                "taille réellement décompressée au-delà de %s; "
+                                "contenu non mesuré"
+                                % format_bytes(PROJECT_MAX_EXPANDED_BYTES))
+                            return out
+                        if keep_json and got <= PROJECT_JSON_MAX_ENTRY_BYTES \
+                                and retained_json + got \
+                                <= PROJECT_JSON_MAX_TOTAL_BYTES:
+                            chunks.append(block)
+                        else:
+                            # Once a JSON entry crosses a budget, no partial
+                            # document is kept: a truncated JSON parse would
+                            # falsely look like corruption.
+                            chunks = []
+                            keep_json = False
+                finally:
+                    handle.close()
+            except (zipfile.BadZipfile, ValueError, EOFError, zlib.error,
+                    NotImplementedError) as exc:
+                out["crc_errors"].append("%s: %s" % (info.filename, exc))
+                continue
+            except (OSError, IOError) as exc:
+                out["read_errors"].append("%s: %s" % (info.filename, exc))
+                continue
+            if info.filename.lower().endswith(".json"):
+                if keep_json and got <= PROJECT_JSON_MAX_ENTRY_BYTES \
+                        and retained_json + got <= PROJECT_JSON_MAX_TOTAL_BYTES:
+                    retained_json += got
+                    try:
+                        text = b"".join(chunks).decode("utf-8-sig")
+                    except UnicodeDecodeError as exc:
+                        out["json_errors"].append("%s: encodage UTF-8 "
+                                                  "invalide: %s"
+                                                  % (info.filename, exc))
+                    else:
+                        out["texts"].append((info.filename, text))
+                else:
+                    out["json_capped"].append(info.filename)
+
+        out["read_complete"] = not out["crc_errors"] and not out["read_errors"]
+        if out["crc_errors"]:
+            out["integrity"] = "Fail"
+            out["integrity_reason"] = (
+                "CRC ou compression invalide: %s"
+                % "; ".join(out["crc_errors"][:10]))
+        elif out["read_errors"]:
+            out["integrity_reason"] = (
+                "éléments non lus: %s" % "; ".join(out["read_errors"][:10]))
+        else:
+            out["integrity"] = "Pass"
+            out["integrity_reason"] = (
+                "%d éléments lus jusqu'à leur fin et vérifiés par CRC"
+                % len([i for i in infos if not i.filename.endswith("/")]))
+
+    # JSON syntax is a separate finding from ZIP integrity. Decode errors are
+    # contained per document so one bad map does not hide every other map.
+    valid_texts = []
+    for name, text in out["texts"]:
+        try:
+            doc = json.loads(text)
+        except (ValueError, TypeError, RecursionError) as exc:
+            out["json_errors"].append("%s: %s" % (name, exc))
+            continue
+        valid_texts.append((name, text))
+        if name == out["main_name"]:
+            if isinstance(doc, dict):
+                out["main"] = doc
+            else:
+                out["main_not_dict"] = True
+    out["texts"] = valid_texts
+    return out
+
+
+def prepare_project_snapshot(path):
+    """Return (temporary snapshot, inspection). The caller removes the snapshot.
+
+    The source is opened only for the copy and for stat checks before/after.
+    If it changes during that copy, the snapshot is rejected instead of
+    presenting a mixture of two saves as one project.
+    """
+    import shutil
+    import tempfile
+
+    # Only stat the source here. The ZIP itself is opened after the snapshot,
+    # never once for a pre-check and then a second time for the real one.
+    initial = _empty_project_inspection(path)
+    if not path or not str(path).lower().endswith(".aprx"):
+        initial["integrity_reason"] = ("le fichier sélectionné ne porte pas "
+                                       "l'extension .aprx")
+        return None, initial
+    try:
+        initial["size"] = os.stat(path).st_size
+    except (OSError, IOError, ValueError) as exc:
+        initial["integrity_reason"] = "lecture du fichier impossible: %s" % exc
+        return None, initial
+    if initial["size"] == 0:
+        initial["integrity"] = "Fail"
+        initial["integrity_reason"] = "le fichier est vide (0 octet)"
+        return None, initial
+    if initial["size"] > PROJECT_MAX_BYTES:
+        initial["integrity_reason"] = (
+            "fichier de %s, au-delà de la limite de sécurité de %s; contenu "
+            "non mesuré" % (format_bytes(initial["size"]),
+                            format_bytes(PROJECT_MAX_BYTES)))
+        return None, initial
+
+    temporary = None
+    try:
+        before = os.stat(path)
+        handle, temporary = tempfile.mkstemp(prefix="properf_aprx_",
+                                             suffix=".aprx")
+        os.close(handle)
+        shutil.copyfile(path, temporary)
+        after = os.stat(path)
+        before_sig = (before.st_size, getattr(before, "st_mtime_ns",
+                                             int(before.st_mtime * 1000000000)))
+        after_sig = (after.st_size, getattr(after, "st_mtime_ns",
+                                           int(after.st_mtime * 1000000000)))
+        if before_sig != after_sig:
+            os.unlink(temporary)
+            temporary = None
+            out = _empty_project_inspection(path)
+            out["size"] = after.st_size
+            out["integrity_reason"] = (
+                "le fichier a changé pendant la copie; fermez les autres "
+                "sessions qui l'enregistrent puis réessayez")
+            return None, out
+        return temporary, inspect_aprx_archive(temporary, path)
+    except (OSError, IOError, ValueError) as exc:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+        out = _empty_project_inspection(path)
+        try:
+            out["size"] = os.stat(path).st_size
+        except (OSError, IOError, ValueError):
+            pass
+        out["integrity_reason"] = "copie instantanée impossible: %s" % exc
+        return None, out
+
+
+def _project_check(cid, title, status, observed, expected, impact, fix,
+                   measured=True, kpi=None):
+    return dict(cid=cid, category="Projet APRX", title=title, status=status,
+                observed=observed, expected=expected, impact=impact, fix=fix,
+                measured=measured, kpi=kpi)
+
+
+def _integrity_project_check(info):
+    lines = ["Projet sélectionné : %s" % info["path"]]
+    if info.get("size") is not None:
+        lines.append("Taille : %s" % format_bytes(info["size"]))
+    if info.get("archive_opened"):
+        lines.append("Éléments ZIP : %d" % info["entries"])
+    lines.append(info["integrity_reason"])
+    return _project_check(
+        "PR-01", "Lisibilité et intégrité du conteneur .aprx",
+        info["integrity"], lines,
+        "Archive ZIP non chiffrée, sans doublon, dont tous les éléments sont "
+        "lus jusqu'à leur fin et validés par CRC, dans les limites de sécurité.",
+        "S6. Un conteneur corrompu peut empêcher l'ouverture du projet ou "
+        "fermer ArcGIS Pro pendant sa lecture.",
+        "Restaurer une sauvegarde; ne reconstruire que si tous les éléments "
+        "sont vérifiables.", measured=info["integrity"] != "Info",
+        kpi={"aprx_bytes": info.get("size") or 0,
+             "zip_entries": info.get("entries") or 0,
+             "crc_errors": len(info.get("crc_errors") or [])})
+
+
+def _structure_project_check(info):
+    errors = info.get("json_errors") or []
+    capped = info.get("json_capped") or []
+    main_error = [e for e in errors if info.get("main_name")
+                  and e.startswith(info["main_name"] + ":")]
+    lines = ["Document principal : %s" % (info.get("main_name")
+                                           or info.get("main_format")
+                                           or "<absent>"),
+             "%d document(s) JSON analysé(s), %d erreur(s) de syntaxe, "
+             "%d document(s) non analysé(s) à cause d'une limite"
+             % (len(info.get("texts") or []), len(errors), len(capped))]
+    lines.extend("JSON invalide : %s" % e for e in errors[:20])
+    lines.extend("Non analysé : %s" % e for e in capped[:20])
+    if info.get("main"):
+        status = "Warn" if errors else ("Info" if capped else "Pass")
+        measured = not capped
+        lines.append("GISProject.json est présent et contient un objet projet.")
+    elif main_error or info.get("main_not_dict"):
+        status, measured = "Fail", True
+        lines.append("GISProject.json ne contient pas un objet projet valide.")
+    elif info.get("main_format") == "xml":
+        status, measured = "Info", False
+        lines.append("Projet au format XML d'ArcGIS Pro 2.x : la réparation "
+                     "JSON Pro 3 n'est pas applicable.")
+    elif info.get("integrity") == "Info":
+        status, measured = "Info", False
+        lines.append("La structure interne n'a pas pu être déterminée.")
+    else:
+        status, measured = "Fail", True
+        lines.append("GISProject.json est absent du projet Pro 3.")
+    return _project_check(
+        "PR-02", "Validité des documents JSON internes du projet", status,
+        lines, "GISProject.json valide et tous les documents JSON analysés "
+        "sans erreur ni troncature.",
+        "S6. Un document interne invalide peut empêcher le chargement d'une "
+        "carte, d'une mise en page ou du projet entier.",
+        "Restaurer une version saine; ne pas supprimer au hasard un document "
+        "référencé par le projet.", measured=measured,
+        kpi={"json_documents": len(info.get("texts") or []),
+             "json_errors": len(errors), "json_capped": len(capped)})
+
+
+def _storage_project_check(env, path, projects):
+    onedrive = onedrive_roots(env)
+    network = env.network_drives()
+    own_class = path_class(path, onedrive, network)
+    lines = ["Fichier projet : %s [%s]" % (path, own_class)]
+    remote = [path] if own_class != "LOCAL" else []
+    for project in projects:
+        for label, slot in (("Dossier principal", "home"),
+                            ("Géodatabase par défaut", "gdb")):
+            value = project.get(slot)
+            if not value:
+                lines.append("%s : <non enregistré>" % label)
+                continue
+            lines.append("%s : %s [%s]" % (label, value[1], value[2]))
+            if value[2] != "LOCAL":
+                remote.append(value[1])
+    status = "Warn" if remote else "Pass"
+    if remote:
+        lines.append("Emplacement(s) distant(s) ou synchronisé(s) : %d"
+                     % len(remote))
+    else:
+        lines.append("Le fichier et les emplacements par défaut enregistrés "
+                     "sont locaux.")
+    return _project_check(
+        "PR-03", "Emplacement du projet et de ses espaces de travail", status,
+        lines, "Projet, dossier principal et géodatabase par défaut sur un "
+        "disque local non synchronisé pour le dépannage.",
+        "S1, S2 et S6. Le réseau ou la synchronisation peut retarder ou "
+        "interrompre l'ouverture et l'enregistrement.",
+        "Tester une copie locale complète en conservant les chemins relatifs.",
+        kpi={"remote_locations": len(remote)})
+
+
+def _database_path(uri):
+    """Extract only DATABASE from a connection string; never print secrets."""
+    text = (uri or "").strip()
+    match = re.search(r"(?:^|;)DATABASE=([^;]+)", text, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        # In an enterprise connection, DATABASE is often just "gis" or
+        # "sde". Treating that as a relative file would invent a missing
+        # source. Only a path-shaped value, or a known file-geodatabase/
+        # database suffix, is eligible for a local existence check.
+        if re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|\.{1,2}[\\/]|/)", value) \
+                or value.lower().endswith((".gdb", ".sqlite", ".db", ".mdb")):
+            return value
+        return None
+    # A plain path is safe to classify. Any other key/value connection string
+    # stays opaque so SERVER/USER/PASSWORD never reaches the report.
+    if "=" not in text and not is_http_uri(text) \
+            and not text.upper().startswith("CIMPATH="):
+        if re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|\.{1,2}[\\/]|/)", text):
+            return text
+    return None
+
+
+def _sources_project_check(env, path, projects):
+    folder = ntpath.dirname(path)
+    network_drives = env.network_drives()
+    onedrive = onedrive_roots(env)
+    missing = {}
+    tested = set()
+    remote = set()
+    opaque = 0
+    services = 0
+    for project in projects:
+        for layer in project.get("layers") or []:
+            uri = layer.get("uri") or ""
+            if is_http_uri(uri):
+                services += 1
+                continue
+            raw = _database_path(uri)
+            if not raw:
+                if uri:
+                    opaque += 1
+                continue
+            expanded = expand_vars(env, raw)
+            if os.name != "nt" and not re.match(r"^[A-Za-z]:", expanded) \
+                    and not expanded.startswith("\\\\"):
+                # The CLI can inspect a copied project off Windows too. Use
+                # the host filesystem for a relative POSIX test path instead
+                # of turning /tmp into the Windows-looking \\tmp.
+                full = os.path.normpath(os.path.join(
+                    folder, expanded.replace("\\", "/")))
+            else:
+                full = ntpath.normpath(ntpath.join(folder, expanded))
+            classification = path_class(full, onedrive, network_drives)
+            if classification != "LOCAL":
+                remote.add(full)
+                continue
+            if full in tested or full in missing:
+                if full in missing:
+                    missing[full].append(layer.get("name") or "<sans nom>")
+                continue
+            tested.add(full)
+            if not env.isdir(full) and not env.isfile(full):
+                missing[full] = [layer.get("name") or "<sans nom>"]
+    lines = ["%d source(s) fichier locale(s) testée(s), %d absente(s)"
+             % (len(tested), len(missing)),
+             "%d source(s) réseau/synchronisée(s) référencée(s) mais non "
+             "contactée(s), %d couche(s) de service HTTP(S), %d connexion(s) "
+             "opaque(s) non testée(s)" % (len(remote), services, opaque)]
+    for source, layers in sorted(missing.items()):
+        lines.append("ABSENTE : %s — couche(s) : %s"
+                     % (source, ", ".join(layers[:12])))
+    for source in sorted(remote)[:20]:
+        lines.append("NON TESTÉE (aucun accès réseau) : %s" % source)
+    if missing:
+        status = "Warn"
+    elif tested and not remote and not opaque:
+        status = "Pass"
+    else:
+        status = "Info"
+    return _project_check(
+        "PR-04", "Sources de données fichier et références indisponibles",
+        status, lines,
+        "Toutes les sources fichier locales existent; les sources distantes "
+        "sont identifiées mais ne sont jamais contactées par ce diagnostic.",
+        "S1 et S2. Une source absente casse l'affichage d'une couche; une "
+        "source distante indisponible peut faire attendre l'ouverture.",
+        "Reconnecter chaque source dans une copie et vérifier le contenu; "
+        "ne pas confondre couche cassée et projet corrompu.",
+        measured=bool(tested or remote or services or opaque),
+        kpi={"local_sources": len(tested), "missing_sources": len(missing),
+             "remote_sources": len(remote), "service_layers": services})
+
+
+def _views_project_check(info):
+    doc = info.get("main")
+    if not doc:
+        return _project_check(
+            "PR-05", "Vues restaurées automatiquement à l'ouverture", "Info",
+            "GISProject.json valide non disponible : les vues n'ont pas été "
+            "mesurées.",
+            "Une liste de vues lisible dans le document principal.",
+            "S6 indéterminé.", "Analyser d'abord PR-01 et PR-02.",
+            measured=False)
+    views = doc.get("views", [])
+    if not isinstance(views, list):
+        return _project_check(
+            "PR-05", "Vues restaurées automatiquement à l'ouverture", "Warn",
+            "La propriété views n'est pas une liste : schéma inattendu %s."
+            % type(views).__name__,
+            "La propriété views, si présente, doit être une liste.",
+            "S6. Cet état de vue incohérent peut perturber la restauration de "
+            "l'interface.", "Restaurer une sauvegarde saine du projet.")
+    layout = len([v for v in views if isinstance(v, dict)
+                  and (v.get("type") == "CIMLayoutView"
+                       or "layout" in str(v.get("viewType", "")).lower())])
+    maps = len(views) - layout
+    has_dock = bool(doc.get("viewLayoutXML"))
+    lines = ["%d vue(s) enregistrée(s) pour réouverture : %d carte/scène(s), "
+             "%d mise(s) en page" % (len(views), maps, layout),
+             "État des volets enregistré : %s" % ("oui" if has_dock else "non")]
+    if views or has_dock:
+        lines.append("Ce n'est pas une anomalie en soi. La copie de "
+                     "récupération peut retirer cet état sans supprimer les "
+                     "cartes ni les mises en page.")
+    status = "Info" if views or has_dock else "Pass"
+    return _project_check(
+        "PR-05", "Vues restaurées automatiquement à l'ouverture", status,
+        lines, "Aucune vue défectueuse restaurée automatiquement pendant un "
+        "diagnostic de crash.",
+        "S6. Une vue qui déclenche un plantage peut être rouverte avant que "
+        "l'utilisateur puisse intervenir.",
+        "Créer une copie sans views ni viewLayoutXML; conserver toutes les "
+        "définitions de cartes et mises en page.",
+        kpi={"saved_views": len(views), "layout_views": layout})
+
+
+def _history_project_check(info):
+    doc = info.get("main")
+    if not doc:
+        return _project_check(
+            "PR-06", "Volume de l'historique de géotraitement", "Info",
+            "GISProject.json valide non disponible : historique non mesuré.",
+            "Une liste projectItems lisible.", "S1 indéterminé.",
+            "Analyser d'abord PR-01 et PR-02.", measured=False)
+    items = doc.get("projectItems", [])
+    if not isinstance(items, list):
+        return _project_check(
+            "PR-06", "Volume de l'historique de géotraitement", "Warn",
+            "La propriété projectItems n'est pas une liste : schéma inattendu "
+            "%s." % type(items).__name__,
+            "La propriété projectItems, si présente, doit être une liste.",
+            "S1 et S6. Le document principal peut être incohérent.",
+            "Restaurer une sauvegarde; réparation automatique refusée.")
+    history = [item for item in items if isinstance(item, dict)
+               and item.get("itemType") == "GPHistory"]
+    try:
+        size = sum(len(json.dumps(item, ensure_ascii=False)) for item in history)
+    except (ValueError, TypeError, RecursionError) as exc:
+        return _project_check(
+            "PR-06", "Volume de l'historique de géotraitement", "Info",
+            "%d éléments GPHistory trouvés, mais leur poids n'a pas pu être "
+            "mesuré: %s: %s" % (len(history), type(exc).__name__, exc),
+            "Une sérialisation bornée des éléments d'historique.",
+            "S1 indéterminé.", "Restaurer une sauvegarde ou inspecter ce "
+            "document avec le support; ne pas le modifier automatiquement.",
+            measured=False, kpi={"history_items": len(history)})
+    status = ("Warn" if len(history) >= PROJECT_HISTORY_WARN
+              or size >= PROJECT_HISTORY_WARN_BYTES else "Pass")
+    lines = ["%d opération(s) dans l'historique de géotraitement"
+             % len(history),
+             "Poids JSON approximatif de ces opérations : %s" % format_bytes(size),
+             "Seuil d'avertissement de cet outil : %d opérations ou %s"
+             % (PROJECT_HISTORY_WARN, format_bytes(PROJECT_HISTORY_WARN_BYTES))]
+    return _project_check(
+        "PR-06", "Volume de l'historique de géotraitement", status, lines,
+        "Historique conservé sous les seuils de cet outil, ou retiré d'une "
+        "copie après sauvegarde des paramètres utiles.",
+        "S1 et S2. Un gros historique allonge la lecture du projet et augmente "
+        "la mémoire utilisée à l'ouverture.",
+        "Créer une copie sans historique si nécessaire; l'original conserve "
+        "les paramètres et messages.",
+        kpi={"history_items": len(history), "history_bytes": size})
+
+
+def _project_document(env, path, checks, applied, notes, recovery):
+    """Build the common report document for a selected-project run."""
+    for check in checks:
+        found = SOURCES.get(check.get("id"))
+        if found:
+            check["sources"] = [list(pair) for pair in found]
+        enrich_check(check)
+    return {
+        "report_version": REPORT_VERSION,
+        "analysis_type": "project",
+        "project": path,
+        "taken": stamp(env.now()),
+        "user": env.username(),
+        "elevated": env.elevated(),
+        "checks": checks,
+        "counts": dict(counts(checks)),
+        "act_first": [c["id"] for c in act_first(checks)],
+        "fixable": [c["id"] for c in fixable(checks)],
+        "applied": applied,
+        "notes": notes,
+        "recovery": recovery,
+        "symptoms": list(SYMPTOMS),
+    }
+
+
+# =============================================================================
 # THE RUN. Order in this list is the order of both reports.
 # =============================================================================
 
@@ -4822,6 +5705,7 @@ def run_checks(env, opts):
         found = SOURCES.get(check.get("id"))
         if found:
             check["sources"] = [list(pair) for pair in found]
+        enrich_check(check)
     return checks, facts
 
 
@@ -4967,20 +5851,269 @@ def run(env, opts):
 
 
 # =============================================================================
+# SELECTED-PROJECT RECOVERY AND RUN
+# =============================================================================
+
+
+def project_recovery_problem(mode, checks, info):
+    """Why the requested recovery copy must not be produced, or None."""
+    if mode not in PROJECT_REPAIR_MODES:
+        return "mode de récupération inconnu: %s" % mode
+    if mode == "none":
+        return "aucune récupération demandée"
+    integrity = by_id(checks, "PR-01")
+    if integrity is None or integrity["status"] != "Pass":
+        return ("PR-01 n'est pas Conforme : tous les éléments du fichier "
+                "doivent être lus et vérifiés avant toute copie reconstruite")
+    if mode == "repack":
+        return None
+    structure = by_id(checks, "PR-02")
+    if structure is None or structure["status"] != "Pass":
+        return ("PR-02 n'est pas Conforme : une copie modifiant le JSON serait "
+                "risquée tant que tous les documents ne sont pas valides")
+    doc = info.get("main")
+    if not isinstance(doc, dict):
+        return "GISProject.json valide est indispensable à cette récupération"
+    if not isinstance(doc.get("views", []), list):
+        return "la propriété views n'a pas le schéma attendu"
+    if not isinstance(doc.get("projectItems", []), list):
+        return "la propriété projectItems n'a pas le schéma attendu"
+    history_check = by_id(checks, "PR-06")
+    if history_check is not None and history_check["status"] not in ("Pass", "Warn"):
+        return "l'historique n'a pas pu être mesuré et sérialisé sans risque"
+    views = doc.get("views", [])
+    has_dock = bool(doc.get("viewLayoutXML"))
+    history = [item for item in doc.get("projectItems", [])
+               if isinstance(item, dict) and item.get("itemType") == "GPHistory"]
+    if mode == "views" and not views and not has_dock:
+        return "le projet n'enregistre aucune vue ni état de volet à retirer"
+    if mode == "views_history" and not views and not has_dock and not history:
+        return "le projet n'a ni vue au démarrage ni historique à retirer"
+    return None
+
+
+def create_aprx_recovery(snapshot, source, mode, now=None):
+    """Write and verify a recovery copy beside source; never modify source.
+
+    repack changes only the ZIP container. views removes `views` and
+    `viewLayoutXML`, not the map/layout definitions. views_history additionally
+    removes projectItems whose itemType is GPHistory. Every other ZIP member is
+    streamed unchanged. Verification happens on the temporary output before it
+    receives its final name.
+    """
+    import shutil
+    import tempfile
+    import zipfile
+
+    if mode not in ("repack", "views", "views_history"):
+        raise ValueError("unsupported project recovery mode: %s" % mode)
+    folder = os.path.dirname(os.path.abspath(source))
+    stem = os.path.splitext(os.path.basename(source))[0]
+    suffix = {"repack": "_reconstruit",
+              "views": "_recuperation_sans_vues",
+              "views_history": "_recuperation_sans_vues_historique"}[mode]
+    output = unique_path(os.path.join(folder, stem + suffix + ".aprx"))
+    handle, temporary = tempfile.mkstemp(prefix=".properf_recovery_",
+                                         suffix=".tmp", dir=folder)
+    os.close(handle)
+    removed_views = 0
+    removed_history = 0
+    try:
+        with zipfile.ZipFile(snapshot, "r") as src:
+            with zipfile.ZipFile(temporary, "w", allowZip64=True) as dst:
+                dst.comment = src.comment
+                for info in src.infolist():
+                    payload = None
+                    if mode != "repack" \
+                            and info.filename.lower() == "gisproject.json":
+                        doc = json.loads(src.read(info).decode("utf-8-sig"))
+                        removed_views = len(doc.get("views", []))
+                        doc.pop("views", None)
+                        doc.pop("viewLayoutXML", None)
+                        if mode == "views_history":
+                            items = doc.get("projectItems", [])
+                            kept = []
+                            for item in items:
+                                if isinstance(item, dict) \
+                                        and item.get("itemType") == "GPHistory":
+                                    removed_history += 1
+                                else:
+                                    kept.append(item)
+                            doc["projectItems"] = kept
+                        payload = json.dumps(doc, ensure_ascii=False,
+                                             separators=(",", ":")).encode("utf-8")
+                    if payload is not None:
+                        dst.writestr(info, payload)
+                    elif info.filename.endswith("/"):
+                        dst.writestr(info, b"")
+                    else:
+                        # Passing the original ZipInfo preserves timestamps,
+                        # attributes and compression while ZipFile computes a
+                        # fresh CRC and sizes for the output stream.
+                        with src.open(info, "r") as reader:
+                            with dst.open(info, "w") as writer:
+                                shutil.copyfileobj(reader, writer, 1024 * 1024)
+
+        verified = inspect_aprx_archive(temporary, output)
+        if verified["integrity"] != "Pass":
+            raise ValueError("la copie produite ne passe pas le contrôle "
+                             "d'intégrité: %s" % verified["integrity_reason"])
+        if mode != "repack":
+            if verified["integrity"] != "Pass" or not verified.get("main"):
+                raise ValueError("GISProject.json n'est pas valide dans la "
+                                 "copie produite")
+            if verified.get("json_errors") or verified.get("json_capped"):
+                raise ValueError("tous les documents JSON de la copie n'ont "
+                                 "pas pu être revérifiés")
+            doc = verified["main"]
+            if "views" in doc or "viewLayoutXML" in doc:
+                raise ValueError("l'état des vues persiste dans la copie")
+            if mode == "views_history" and any(
+                    isinstance(item, dict) and item.get("itemType") == "GPHistory"
+                    for item in doc.get("projectItems", [])):
+                raise ValueError("des éléments GPHistory persistent dans la copie")
+        os.rename(temporary, output)
+        temporary = None
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+    if mode == "repack":
+        action = ("conteneur ZIP reconstruit; tous les documents internes "
+                  "sont restés inchangés")
+    else:
+        action = ("%d vue(s) et l'état des volets retirés de la copie"
+                  % removed_views)
+        if mode == "views_history":
+            action += "; %d élément(s) d'historique retirés" % removed_history
+    return {
+        "id": "APRX-REC-01",
+        "what": "Copie de récupération du projet créée sans modifier l'original.",
+        "result": "%s\nOriginal conservé : %s\nCopie vérifiée : %s"
+                  % (action, source, output),
+        "undo": ("Aucune restauration n'est nécessaire : l'original n'a pas "
+                 "été modifié. Revenez à %s ; ne supprimez la copie qu'après "
+                 "avoir vérifié que vous n'en avez plus besoin." % source),
+        "when": stamp(now if now is not None else time.time()),
+        "path": output,
+        "mode": mode,
+    }
+
+
+def run_project(env, opts):
+    """Analyse one explicitly selected .aprx, optionally writing a safe copy."""
+    selected = opts.get("project_path") or opts.get("project")
+    mode = opts.get("repair", "none")
+    snapshot, info = prepare_project_snapshot(selected)
+    path = selected or "<aucun projet sélectionné>"
+    info["path"] = path
+    checks = []
+    applied = []
+    notes = []
+    recovery = {"requested": mode, "source": path, "path": None}
+    try:
+        for record in (_integrity_project_check(info),
+                       _structure_project_check(info)):
+            add_check(checks, **record)
+
+        projects = []
+        if info.get("texts"):
+            try:
+                found = scan_aprx(path, info["texts"], onedrive_roots(env),
+                                  env.network_drives())
+                found["truncated"] = bool(info.get("json_capped")
+                                          or info.get("json_errors")
+                                          or found.get("capped"))
+                if info.get("json_errors"):
+                    found["error"] = "; ".join(info["json_errors"][:20])
+                projects = [found]
+            except Exception as exc:
+                # Keep the integrity findings and turn the content walk into an
+                # honest undetermined record rather than aborting the report.
+                projects = []
+                info["json_errors"].append("parcours du projet: %s: %s"
+                                           % (type(exc).__name__, exc))
+
+        add_check(checks, **_storage_project_check(env, path, projects))
+        add_check(checks, **_sources_project_check(env, path, projects))
+        add_check(checks, **_views_project_check(info))
+        add_check(checks, **_history_project_check(info))
+
+        sizes = [(path, info["size"])] if info.get("size") is not None else []
+        decisions = [
+            ("PF-10", "Project weight", lambda: decide_project_weight(projects, sizes)),
+            ("PF-22", "Refresh timers and default geodatabase",
+             lambda: decide_aprx("closed", projects)),
+            ("PF-09", "Layers served over the network",
+             lambda: decide_http_layers(projects)),
+            ("PF-01", "Coordinate systems in the project",
+             lambda: decide_projection(projects)),
+            ("PF-14", "Per-layer draw load", lambda: decide_layer_load(projects)),
+        ]
+        for cid, title, decision in decisions:
+            def body(target, decision=decision):
+                add_check(target, **decision())
+            safe_check(checks, cid, "Projet APRX", title, body)
+
+        if mode == "none":
+            notes.append("Diagnostic seul : le fichier source n'a été ni "
+                         "renommé ni réécrit. Une copie de récupération peut "
+                         "être demandée explicitement.")
+        else:
+            problem = project_recovery_problem(mode, checks, info)
+            if problem:
+                notes.append("RÉCUPÉRATION REFUSÉE : %s" % problem)
+                recovery["status"] = "refused"
+                recovery["reason"] = problem
+            elif not snapshot:
+                problem = "la copie instantanée locale n'est pas disponible"
+                notes.append("RÉCUPÉRATION REFUSÉE : %s" % problem)
+                recovery["status"] = "refused"
+                recovery["reason"] = problem
+            else:
+                try:
+                    record = create_aprx_recovery(snapshot, path, mode, env.now())
+                except Exception as exc:
+                    problem = "%s: %s" % (type(exc).__name__, exc)
+                    notes.append("ÉCHEC DE LA RÉCUPÉRATION : %s. L'original "
+                                 "n'a pas été modifié." % problem)
+                    recovery["status"] = "failed"
+                    recovery["reason"] = problem
+                else:
+                    applied.append(record)
+                    recovery["status"] = "created"
+                    recovery["path"] = record["path"]
+                    notes.append("Récupération créée et revérifiée : %s"
+                                 % record["path"])
+        return _project_document(env, path, checks, applied, notes, recovery)
+    finally:
+        if snapshot and os.path.exists(snapshot):
+            os.unlink(snapshot)
+
+
+# =============================================================================
 # REPORTING
 # =============================================================================
 
 def render(document, verbose=False):
     """The console and text report, as a list of lines."""
-    lines = ["ArcGIS Pro Performance Analyser %d  -  workstation diagnostic"
-             % REPORT_VERSION,
+    is_project = document.get("analysis_type") == "project"
+    lines = ["ArcGIS Pro Performance Analyser %d  -  %s"
+             % (REPORT_VERSION, "selected .aprx project diagnostic" if is_project
+                else "workstation diagnostic"),
              "taken %s UTC as %s (elevated: %s)"
              % (document["taken"], document["user"], document["elevated"]),
              ""]
+    if document.get("project"):
+        lines.append("Selected project: %s" % document["project"])
+        lines.append("The source was analysed through a snapshot; it was not "
+                     "rewritten by the diagnostic.")
+        lines.append("")
     lines.append("Symptom key used in the impact lines:")
     for code, text in SYMPTOMS:
         lines.append("  %s  %s" % (code, text))
-    for heading, wanted in (("DATA LOSS", True), ("PERFORMANCE", False)):
+    for heading, wanted in (("DATA LOSS", True),
+                            ("PROJECT" if is_project else "PERFORMANCE", False)):
         lines.append("")
         lines.append("--- %s %s" % (heading, "-" * (62 - len(heading))))
         for check in document["checks"]:
@@ -5023,10 +6156,18 @@ def render_check(check, verbose=False):
     for line in check["observed"].split("\n"):
         if line.strip():
             lines.append("          " + line)
-    if check["status"] in ("Warn", "Fail") or verbose:
-        if check["impact"]:
+    if check["status"] in ("Warn", "Fail", "Info", "Skipped") or verbose:
+        if check.get("explanation"):
+            lines.append("          pourquoi : %s" % check["explanation"])
+        if check.get("impact_fr"):
+            lines.append("          impact : %s" % check["impact_fr"])
+        elif check["impact"]:
             lines.append("          impact : %s" % check["impact"])
-        if check["fix"]:
+        for number, step in enumerate(check.get("steps") or [], 1):
+            lines.append("          action %d : %s" % (number, step))
+        if check.get("verification") and check["status"] in ("Warn", "Fail"):
+            lines.append("          vérification : %s" % check["verification"])
+        if check["fix"] and not check.get("steps"):
             lines.append("          fix    : %s" % check["fix"])
     if verbose:
         if check["expected"]:
@@ -5080,8 +6221,11 @@ def write_report(document, directory, verbose=False):
     """Write the text and JSON reports. Returns the two paths."""
     if not os.path.isdir(directory):
         os.makedirs(directory)
-    base = "arcgis_pro_performance_analyser_%s" % time.strftime(
-        "%Y%m%d_%H%M%S", time.gmtime(time.time()))
+    prefix = ("arcgis_pro_project_analysis"
+              if document.get("analysis_type") == "project"
+              else "arcgis_pro_performance_analyser")
+    base = "%s_%s" % (prefix, time.strftime(
+        "%Y%m%d_%H%M%S", time.gmtime(time.time())))
     text_path = unique_path(os.path.join(directory, base + ".txt"))
     json_path = unique_path(os.path.join(directory, base + ".json"))
     handle = open(text_path, "wb")
@@ -6584,10 +7728,12 @@ def self_test():
 
     registered = set(cid for cid, _c, _t, _d, _p
                      in registrations(FakeEnv(), {}, {}))
+    registered.update(PROJECT_CHECK_IDS)
     unknown = sorted(set(SOURCES) - registered)
     check(not unknown,
-          "every check id in SOURCES is a check the tool actually registers, "
-          "so no source is attached to a check that no longer exists "
+          "every check id in SOURCES is registered by the workstation or "
+          "selected-project analyser, so no source is attached to a check "
+          "that no longer exists "
           "<-- pinned defect")
     malformed = sorted(cid for cid, pairs in SOURCES.items()
                        for pair in pairs
@@ -7902,8 +9048,8 @@ def self_test():
           "a real run exits 0, 1, 2 or 3, whatever this machine turns out to "
           "be")
     live_document = json.loads(printed)
-    check(live_document["report_version"] == 3,
-          "the JSON it prints carries report version 2, the number a diff "
+    check(live_document["report_version"] == 4,
+          "the JSON it prints carries report version 4, the number a diff "
           "against a known-good workstation is taken at: comparing it to the "
           "constant that defines it would hold for any value")
     check(len(live_document["checks"]) == len(expected_run),
@@ -8370,7 +9516,7 @@ def self_test():
     jr_dir = tempfile.mkdtemp(prefix="properf-json-report-")
     try:
         code, out, err = with_env(fake_healthy, ["--json", "--report", jr_dir])
-        check(json.loads(out)["report_version"] == 3,
+        check(json.loads(out)["report_version"] == 4,
               "--json with --report prints one JSON document on stdout  "
               "<-- pinned defect")
         check("report :" in err and "report :" not in out,
@@ -8384,7 +9530,7 @@ def self_test():
 
     code, out, err = with_env(OffMachine, ["--json"])
     check("almost every probe" in err and "almost every probe" not in out
-          and json.loads(out)["report_version"] == 3,
+          and json.loads(out)["report_version"] == 4,
           "off Windows the note goes to stderr and stdout stays a document")
 
     # The reading layer, reached with stand-ins instead of left unreached.
@@ -8703,10 +9849,12 @@ def _parse(argv):
     ap = _Parser(
         prog="arcgis_pro_performance_analyser.py",
         allow_abbrev=False,
-        description="Diagnose why ArcGIS Pro is slow on this workstation, and "
-                    "never report a finding the machine did not produce.",
-        epilog="Check by default. Without --apply nothing on the machine "
-               "changes, and without --sde-server or --portal no host is "
+        description="Diagnose this workstation or one explicitly selected "
+                    ".aprx, and never report a finding the file or machine "
+                    "did not produce.",
+        epilog="Check by default. Without --apply or --project-repair, nothing "
+               "on the machine or in the source project changes; without "
+               "--sde-server or --portal no host is "
                "contacted, apart from reading a project folder that already "
                "lives on a share. Connection files are recorded by path and "
                "never opened.")
@@ -8718,7 +9866,7 @@ def _parse(argv):
                     help="print the report as JSON instead of the console form")
     ap.add_argument("--report", metavar="DIR",
                     help="write the text and JSON reports into this directory. "
-                         "Without it nothing is written anywhere.")
+                         "Without it no report files are written.")
     ap.add_argument("--sde-server", dest="sde_server", metavar="HOST",
                     help="TCP-probe this enterprise geodatabase host. Connect "
                          "only, no credential. Without it the probe is skipped.")
@@ -8731,6 +9879,14 @@ def _parse(argv):
     ap.add_argument("--timeout", type=int, default=4000, metavar="MS",
                     help="bound on each network probe in milliseconds "
                          "(default 4000)")
+    ap.add_argument("--project", metavar="APRX",
+                    help="analyse only this explicitly selected .aprx through "
+                         "a local snapshot, even while another project is open")
+    ap.add_argument("--project-repair", choices=PROJECT_REPAIR_MODES,
+                    default="none", metavar="MODE",
+                    help="with --project: none, repack, views or views_history. "
+                         "Always writes a new copy beside the source; never "
+                         "rewrites the source")
     ap.add_argument("--apply", action="store_true",
                     help="run the gated fixes. Off by default. Each one is "
                          "refused unless its check actually failed, prints its "
@@ -8746,6 +9902,23 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    if args.project_repair != "none" and not args.project:
+        print("error: --project-repair requires --project APRX.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.project and args.apply:
+        print("error: --apply is for workstation fixes and cannot be combined "
+              "with --project; use --project-repair for a recovery copy.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.project and (args.sde_server or args.portal):
+        print("error: --project is a project-only analysis; remove the "
+              "workstation network probes.", file=sys.stderr)
+        return USAGE_ERROR
+    if args.project and not args.project.lower().endswith(".aprx"):
+        print("error: --project requires a file with the .aprx extension.",
+              file=sys.stderr)
+        return USAGE_ERROR
     if args.timeout < 1:
         print("error: --timeout must be at least 1 millisecond.",
               file=sys.stderr)
@@ -8770,7 +9943,7 @@ def main(argv=None):
     make_output_safe(sys.stderr)
 
     env = Env()
-    if not env.windows:
+    if not env.windows and not args.project:
         # stderr, not stdout: --json must emit a document and nothing else,
         # or the caller parsing it gets a note where the report should be.
         print("note: this is a Windows workstation diagnostic. On %s almost "
@@ -8778,11 +9951,15 @@ def main(argv=None):
               "undetermined check looks like. Use --self-test to verify the "
               "tool itself here." % sys.platform, file=sys.stderr)
 
-    document = run(env, {"sde_server": args.sde_server,
-                         "sde_port": args.sde_port,
-                         "portal": args.portal,
-                         "timeout": args.timeout,
-                         "apply": args.apply})
+    if args.project:
+        document = run_project(env, {"project_path": args.project,
+                                     "repair": args.project_repair})
+    else:
+        document = run(env, {"sde_server": args.sde_server,
+                             "sde_port": args.sde_port,
+                             "portal": args.portal,
+                             "timeout": args.timeout,
+                             "apply": args.apply})
 
     if args.json:
         print(json.dumps(document, indent=1, sort_keys=True))
@@ -8803,14 +9980,18 @@ def main(argv=None):
         print("", file=out)
         print("  report : %s" % text_path, file=out)
         print("  report : %s" % json_path, file=out)
-        print("  Diff the JSON against a known-good workstation to isolate "
-              "what is different about this one.", file=out)
+        if document.get("analysis_type") == "project":
+            print("  Comparez ce JSON avec celui d'une copie saine du projet "
+                  "pour isoler la différence.", file=out)
+        else:
+            print("  Diff the JSON against a known-good workstation to isolate "
+                  "what is different about this one.", file=out)
 
     return exit_code(document["checks"])
 
 # ============================================================================
 # 2/3  HTML report renderer
-# source: html_report.py  (sha256:beb3f3098f4f)
+# source: html_report.py  (sha256:184c9b6eaf73)
 # ----------------------------------------------------------------------------
 # r"""Render an ArcGIS Pro Performance Analyser report as one self-contained
 # HTML page.
@@ -8871,7 +10052,7 @@ STATUS_FR = {
 
 EXIT_MEANING = {
     0: "Nothing to act on.",
-    1: "Performance findings, none of them bearing on lost edits.",
+    1: "Measured findings, none of them bearing on lost edits.",
     2: "At least one finding bearing on lost edits.",
     3: "No finding, and nothing was determined either.",
     64: "A usage error, or the report could not be written.",
@@ -8890,6 +10071,7 @@ SYMPTOM_FALLBACK = (
            "redessine pas"),
     ("S5", "un copier ou coller d'entite ne fait rien pendant plusieurs "
            "secondes, et les tentatives suivantes le dupliquent"),
+    ("S6", "ArcGIS Pro se ferme ou le projet plante pendant son ouverture"),
 )
 
 # What each finding costs the score. A finding that bears on lost edits costs
@@ -9250,6 +10432,17 @@ Consolas,"Courier New",monospace}
 padding:9px 11px;font-size:13px;margin-top:8px}
 .check.is-fail .sol,.check.is-warn .sol{background:#f7fbf8}
 .impact{font-size:13px;color:var(--mut)}
+.why{font-size:13px;color:var(--ink)}
+.steps{margin:6px 0 0;padding-left:1.45rem;font-size:13px}
+.steps li{margin:.4rem 0;padding-left:.15rem}
+.steps li::marker{font-weight:700;color:var(--accent)}
+.verify{margin-top:8px;padding:8px 10px;border-left:3px solid var(--info);
+background:#f3f8ff;font-size:13px}
+.guide{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;
+margin:12px 0}
+.guide>div{background:var(--card);border:1px solid var(--line);border-radius:8px;
+padding:10px 12px;font-size:13px}
+.guide b{display:block;color:var(--accent);margin-bottom:3px}
 .srclist{margin:0;padding-left:1.1rem;font-size:13px}
 .srclist li{margin:.15rem 0}
 .srclist a{color:#0b5cad;text-decoration:none;word-break:break-word}
@@ -9307,6 +10500,8 @@ nav.toc a.hot .n{background:#3d1512;color:var(--bad)}
 .banner.calm{background:#0f2417;border-color:var(--good)}
 .banner.undone{background:#0e1c2c;border-color:var(--info)}
 .sol{background:#132318;border-color:#24462e}
+.verify{background:#0e1c2c}
+.guide>div{background:#171b21}
 code,.chip{background:#232931}}
 """
 
@@ -9407,6 +10602,13 @@ def _banner(document):
                 'premier &mdash; ces trouvailles portent sur les modifications '
                 'perdues</h3><ul>%s</ul></div>' % items)
     verdicts = [c for c in checks if c.get("status") in ("Fail", "Warn")]
+    if verdicts and document.get("analysis_type") == "project":
+        return ('<div class="banner undone"><h3>Anomalies d&eacute;tect&eacute;es '
+                'dans le projet s&eacute;lectionn&eacute;</h3><p>%d contr&ocirc;le(s) '
+                '&agrave; traiter. Lisez PR-01 et PR-02 en premier pour la '
+                'corruption, puis PR-05 si Pro plante en rouvrant une vue. '
+                'Chaque carte donne les &eacute;tapes et la v&eacute;rification.'
+                '</p></div>' % len(verdicts))
     if verdicts:
         return ('<div class="banner undone"><h3>Findings de performance '
                 'seulement</h3><p>%d trouvaille(s), aucune ne porte sur des '
@@ -9422,6 +10624,29 @@ def _banner(document):
     return ('<div class="banner calm"><h3>Rien &agrave; traiter</h3>'
             '<p>Tous les contr&ocirc;les qui ont pu &ecirc;tre lus sont '
             'conformes.</p></div>')
+
+
+def _reading_guide(document):
+    """A short, explicit reading order before the technical cards."""
+    project = document.get("analysis_type") == "project"
+    intro = ("Ce rapport analyse uniquement le fichier .aprx indiqué dans "
+             "l'en-tête, à partir d'une copie instantanée. Le projet actif "
+             "n'est ni ouvert ni modifié par ce diagnostic." if project else
+             "Chaque anomalie ci-dessous est fondée sur une valeur réellement "
+             "lue sur ce poste. Info et Non mesuré ne sont pas des preuves de "
+             "panne.")
+    return ('<section id="mode-emploi"><h2>Comment lire et corriger</h2>'
+            '<p class="lead">%s</p><div class="guide">'
+            '<div><b>1. Lire la mesure</b>La ligne « problème détecté » '
+            'indique les faits et les chemins concernés.</div>'
+            '<div><b>2. Comprendre l&rsquo;impact</b>Elle est suivie de '
+            'l&rsquo;explication et des effets possibles dans ArcGIS Pro, '
+            'sans confondre corrélation et cause certaine.</div>'
+            '<div><b>3. Agir dans l&rsquo;ordre</b>Suivez les étapes '
+            'numérotées. Testez une correction à la fois sur une copie.</div>'
+            '<div><b>4. Vérifier le résultat</b>Rejouez le même scénario '
+            'puis relancez le contrôle indiqué avant de reprendre la '
+            'production.</div></div></section>' % esc(intro))
 
 
 def _check_card(check):
@@ -9442,20 +10667,42 @@ def _check_card(check):
                     if check.get("dataloss") else "",
                     esc(check.get("title")), esc(check.get("category"))))
 
-    if finding:
-        parts.append('<div class="blk"><div class="h">Probl&egrave;me '
-                     'd&eacute;tect&eacute;</div>%s</div>'
-                     % _multiline(check.get("observed")))
-        if check.get("impact"):
-            parts.append('<div class="blk"><div class="h">Impact</div>'
-                         '<div class="impact">%s</div></div>'
-                         % esc(check.get("impact")))
-        if check.get("fix"):
-            parts.append('<div class="sol"><div class="h">Correction / '
-                         'optimisation</div>%s</div>' % esc(check.get("fix")))
-    else:
-        parts.append('<div class="blk">%s</div>'
-                     % _multiline(check.get("observed")))
+    parts.append('<div class="blk"><div class="h">%s</div>%s</div>'
+                 % ("Probl&egrave;me d&eacute;tect&eacute; &mdash; valeurs "
+                    "mesur&eacute;es" if finding else "R&eacute;sultat du "
+                    "contr&ocirc;le", _multiline(check.get("observed"))))
+
+    explanation = check.get("explanation")
+    impact_fr = check.get("impact_fr")
+    steps = check.get("steps") or []
+    verification = check.get("verification")
+    # Pass needs no remediation panel. Info and Skipped do: their actions tell
+    # the reader how to obtain the missing measurement instead of pretending
+    # that a cause was found.
+    show_actions = finding or status in ("Info", "Skipped")
+    if explanation and show_actions:
+        parts.append('<div class="blk"><div class="h">Pourquoi ce '
+                     'r&eacute;sultat est important</div>'
+                     '<div class="why">%s</div></div>' % esc(explanation))
+    if show_actions and (impact_fr or check.get("impact")):
+        parts.append('<div class="blk"><div class="h">Impact concret sur '
+                     'ArcGIS Pro</div><div class="impact">%s</div></div>'
+                     % esc(impact_fr or check.get("impact")))
+    if steps and show_actions:
+        items = "".join("<li>%s</li>" % esc(step) for step in steps)
+        parts.append('<div class="sol"><div class="h">%s</div>'
+                     '<ol class="steps">%s</ol></div>'
+                     % ("Actions &agrave; prendre, dans l&rsquo;ordre"
+                        if finding else "Comment lever le point bloquant",
+                        items))
+    elif finding and check.get("fix"):
+        # Compatibility for a document produced before format 4 or for a
+        # caller-defined check that has no entry in the guidance table.
+        parts.append('<div class="sol"><div class="h">Correction / '
+                     'optimisation</div>%s</div>' % esc(check.get("fix")))
+    if verification and show_actions:
+        parts.append('<div class="verify"><b>V&eacute;rification apr&egrave;s '
+                     'correction :</b> %s</div>' % esc(verification))
 
     # Sources are rendered for EVERY status, not only Warn/Fail: an Info
     # check is still a check whose reference someone may want to read.
@@ -9480,27 +10727,28 @@ def _check_card(check):
 
     extras = []
     if check.get("expected"):
-        extras.append('<div class="blk"><div class="h">Attendu</div>'
-                      '<div class="impact">%s</div></div>'
+        extras.append('<div class="blk"><div class="h">Valeur ou &eacute;tat '
+                      'attendu</div><div class="impact">%s</div></div>'
                       % esc(check.get("expected")))
-    if not finding and check.get("impact"):
-        extras.append('<div class="blk"><div class="h">Impact</div>'
-                      '<div class="impact">%s</div></div>'
+    if check.get("impact") and impact_fr:
+        extras.append('<div class="blk"><div class="h">Impact technique '
+                      'd&rsquo;origine</div><div class="impact">%s</div></div>'
                       % esc(check.get("impact")))
-    if not finding and check.get("fix"):
+    if check.get("fix") and (steps or not finding):
         extras.append('<div class="blk"><div class="h">Correction / '
-                      'optimisation</div><div class="impact">%s</div></div>'
+                      'optimisation &mdash; d&eacute;tails techniques'
+                      '</div><div class="impact">%s</div></div>'
                       % esc(check.get("fix")))
     if check.get("detail"):
-        extras.append('<div class="blk"><div class="h">Preuve</div>%s</div>'
-                      % _multiline(check.get("detail")))
+        extras.append('<div class="blk"><div class="h">Preuve compl&eacute;mentaire'
+                      '</div>%s</div>' % _multiline(check.get("detail")))
     if check.get("autofixable"):
         extras.append('<div class="blk"><div class="h">Automatisable</div>'
                       '<div class="impact">oui &mdash; relancez avec les '
                       'correctifs activ&eacute;s</div></div>')
     if extras:
-        parts.append('<details><summary>attendu, preuve et correctif '
-                     'manuel</summary>%s</details>' % "".join(extras))
+        parts.append('<details><summary>attendu, preuve et d&eacute;tails '
+                     'techniques</summary>%s</details>' % "".join(extras))
     parts.append("</article>")
     return "".join(parts)
 
@@ -9604,11 +10852,17 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
     code = exit_code if exit_code is not None else document.get("exit_code")
     dl_block, dl_total = _checks_section(document, True, "perte-donnees",
                                          "Perte de donn&eacute;es")
+    perf_heading = ("Analyse du projet s&eacute;lectionn&eacute;"
+                    if document.get("analysis_type") == "project" else
+                    "Performance")
     perf_block, perf_total = _checks_section(document, False, "performance",
-                                             "Performance")
+                                             perf_heading)
     act = len(document.get("act_first") or [])
 
-    head = ['<header class="top"><h1>Diagnostic de poste ArcGIS Pro</h1>',
+    report_title = ("Diagnostic d'un projet .aprx externe"
+                    if document.get("analysis_type") == "project" else
+                    "Diagnostic de poste ArcGIS Pro")
+    head = ['<header class="top"><h1>%s</h1>' % esc(report_title),
             '<div class="sub">ArcGIS Pro Performance Analyser &mdash; format de rapport %s &middot; '
             'relev&eacute; le <b>%s UTC</b> &middot; compte <b>%s</b> &middot; '
             '&eacute;lev&eacute; <b>%s</b></div>'
@@ -9624,13 +10878,15 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
 
     toc = ['<nav class="toc"><ul>',
            '<li><a href="#synthese">Synth&egrave;se</a></li>',
+           '<li><a href="#mode-emploi">Mode d&rsquo;emploi</a></li>',
            '<li><a href="#jauges">Jauges</a></li>',
            '<li><a href="#symptomes">Drapeaux</a></li>',
            '<li><a class="%s" href="#perte-donnees">Perte de donn&eacute;es'
            '<span class="n">%d</span></a></li>'
            % ("hot" if act else "", dl_total),
-           '<li><a href="#performance">Performance<span class="n">%d</span>'
-           '</a></li>' % perf_total,
+           '<li><a href="#performance">%s<span class="n">%d</span>'
+           '</a></li>' % ("Projet" if document.get("analysis_type") == "project"
+                          else "Performance", perf_total),
            '<li><a href="#correctifs">Correctifs</a></li>',
            '<li><a href="#legende">L&eacute;gende</a></li>',
            '<li><a href="#json">JSON</a></li>',
@@ -9655,6 +10911,7 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
     body = ["".join(head), "".join(toc), '<div class="wrap">',
             '<section id="synthese"><h2>Synth&egrave;se</h2>',
             _banner(document), _kpi_cards(document), "</section>",
+            _reading_guide(document),
             '<section id="jauges"><h2>Jauges</h2><p class="lead">Chaque jauge '
             'est dessin&eacute;e &agrave; partir d&rsquo;un nombre que le '
             'contr&ocirc;le a mesur&eacute;, jamais d&rsquo;une phrase '
@@ -9704,7 +10961,7 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 
 # ============================================================================
 # 3/3  ArcGIS Pro toolbox glue
-# source: toolbox_glue.py  (sha256:081b144a742d)
+# source: toolbox_glue.py  (sha256:9a95f3f43878)
 # ----------------------------------------------------------------------------
 # r"""The ArcGIS Pro glue: two geoprocessing tools over the diagnostic engine
 # and the HTML renderer.
@@ -9718,9 +10975,14 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 #
 # The two tools appear under "ArcGIS Pro Performance Analyser".
 #
-# Run "Diagnose ArcGIS Pro slowness" from the Geoprocessing pane. It writes
+# Run "Diagnostiquer la lenteur d'ArcGIS Pro" for the workstation. It writes
 # arcgis_pro_performance_analyser_<stamp>.html, .json and .txt into the output
 # folder and opens the HTML in the default browser.
+#
+# Run "Analyser un projet .aprx externe" for an explicitly selected, non-active
+# project. That reader snapshots the file, performs bounded ZIP/JSON/source
+# checks and can write a verified recovery COPY beside the source. The original
+# is never rewritten, and the recovery choice is diagnostic-only by default.
 #
 # Read this before you trust the numbers
 # --------------------------------------
@@ -9739,8 +11001,9 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 # prompt in the editor's own session. The toolbox exists for the run you can do
 # without leaving the application, and it says so on the page.
 #
-# Nothing here signs in to anything, no host is contacted unless you name one,
-# and no machine state changes unless you tick "Apply the gated fixes".
+# Nothing here signs in to anything and no host is contacted unless you name one.
+# Machine state changes only through the explicit workstation-fix switch or an
+# explicit selected-project recovery mode; the latter writes a new copy only.
 # ============================================================================
 
 import os
@@ -9796,6 +11059,69 @@ def _tail(text, lines=40):
     return kept[-lines:]
 
 
+def _current_project_path():
+    """The active project's path, or None when Pro has none/cannot answer."""
+    try:
+        project = arcpy.mp.ArcGISProject("CURRENT")
+        return project.filePath or None
+    except Exception:
+        return None
+
+
+def _same_path(left, right):
+    if not left or not right:
+        return False
+    return os.path.normcase(os.path.abspath(left)) == \
+        os.path.normcase(os.path.abspath(right))
+
+
+def _safe_stem(path):
+    """A readable report filename without path punctuation."""
+    stem = os.path.splitext(os.path.basename(path or "projet"))[0]
+    cleaned = "".join(c if c.isalnum() or c in ("-", "_") else "_"
+                      for c in stem)
+    return cleaned.strip("_")[:80] or "projet"
+
+
+def _emit_findings(document, messages):
+    """Put the explanation and ordered actions in the Pro messages as well."""
+    for check in document.get("checks") or []:
+        if check.get("status") not in ("Fail", "Warn"):
+            continue
+        messages.addWarningMessage(
+            "[%s] %s — %s" % (check.get("id"),
+                              "ANOMALIE" if check.get("status") == "Fail"
+                              else "AVERTISSEMENT", check.get("title")))
+        evidence = [line for line in (check.get("observed") or "").splitlines()
+                    if line.strip()]
+        for line in evidence[:3]:
+            messages.addMessage("  Mesure : %s" % line)
+        if len(evidence) > 3:
+            messages.addMessage("  … %d autre(s) ligne(s) de mesure dans le "
+                                "rapport." % (len(evidence) - 3))
+        if check.get("explanation"):
+            messages.addMessage("  Pourquoi : %s" % check["explanation"])
+        if check.get("impact_fr") or check.get("impact"):
+            messages.addMessage("  Impact ArcGIS Pro : %s"
+                                % (check.get("impact_fr") or check.get("impact")))
+        for number, step in enumerate(check.get("steps") or [], 1):
+            messages.addMessage("  Étape %d : %s" % (number, step))
+        if check.get("verification"):
+            messages.addMessage("  Vérification : %s" % check["verification"])
+
+
+RECOVERY_NONE = "Diagnostic uniquement — ne créer aucune copie"
+RECOVERY_REPACK = "Reconstruire le conteneur — contenu interne inchangé"
+RECOVERY_VIEWS = "Copie de récupération sans vues au démarrage"
+RECOVERY_VIEWS_HISTORY = "Copie de récupération sans vues ni historique"
+RECOVERY_MODES = {
+    RECOVERY_NONE: "none",
+    RECOVERY_REPACK: "repack",
+    RECOVERY_VIEWS: "views",
+    RECOVERY_VIEWS_HISTORY: "views_history",
+}
+
+
 class Toolbox(object):
     def __init__(self):
         self.label = "ArcGIS Pro Performance Analyser"
@@ -9806,7 +11132,7 @@ class Toolbox(object):
             "produite. Rend un rapport HTML, contrôle par contrôle : ce qui "
             "a été mesuré, ce que cela coûte à ArcGIS Pro, et quoi faire. "
             "Lecture seule tant que les correctifs ne sont pas cochés.")
-        self.tools = [Diagnose]
+        self.tools = [Diagnose, AnalyzeProject]
         self.canRunInBackground = False
 
 
@@ -9816,12 +11142,12 @@ class Diagnose(object):
     def __init__(self):
         self.label = "Diagnostiquer la lenteur d'ArcGIS Pro"
         self.description = (
-            "L'OUTIL À LANCER. Lit ce poste — registre, stockage, "
+            "DIAGNOSTIC DU POSTE. Lit ce poste — registre, stockage, "
             "redirection OneDrive, réseau, processeur, carte graphique, "
             "cache, journal d'événements — et rend un rapport HTML qui dit, "
             "contrôle par contrôle, ce qui a été mesuré, ce que cela coûte à "
-            "ArcGIS Pro et comment le corriger. Trente-huit contrôles, dont "
-            "treize portent sur des modifications qui peuvent se perdre, et "
+            "ArcGIS Pro et comment le corriger. Les contrôles portent notamment "
+            "sur les modifications qui peuvent se perdre, et "
             "un qui relève dans le journal d'événements les plantages, les "
             "suspensions et les fermetures sans arrêt propre. Lecture seule, "
             "sauf si vous cochez explicitement les correctifs. Écrit un HTML, "
@@ -10192,6 +11518,7 @@ class Diagnose(object):
         for status, count in engine.counts(document["checks"]):
             if count:
                 messages.addMessage("  %-8s %d" % (status.upper(), count))
+        _emit_findings(document, messages)
         if document["act_first"]:
             messages.addWarningMessage(
                 "ACT ON THESE FIRST - they bear on the vanished edits: %s"
@@ -10222,5 +11549,294 @@ class Diagnose(object):
             "The report carries the account name, local paths, connection file "
             "names and exclusion paths. Read it before you send it to anyone.")
         messages.addMessage("Analyser exit code %d: %s"
+                            % (code, report.EXIT_MEANING.get(code, "?")))
+        return
+
+
+class AnalyzeProject(object):
+    """Read one explicitly selected, non-active .aprx and optionally recover a copy."""
+
+    def __init__(self):
+        self.label = "Analyser un projet .aprx externe"
+        self.description = (
+            "Sélectionnez un fichier .aprx autre que le projet actuellement "
+            "ouvert. L'outil en fait une copie instantanée temporaire, vérifie "
+            "le conteneur ZIP, les documents JSON, les vues restaurées, "
+            "l'historique, les sources et la charge des cartes. Le rapport "
+            "explique chaque problème, son impact dans ArcGIS Pro et les "
+            "étapes de correction. En option, il crée une copie de récupération "
+            "sans vues au démarrage et/ou sans historique. L'original n'est "
+            "jamais modifié.")
+        self.canRunInBackground = False
+        self.category = "Diagnostic"
+
+    def getParameterInfo(self):
+        def hinted(param, tooltip, long_help):
+            param.helpMessage = tooltip
+            param.parameterHelp = long_help
+            return param
+
+        project = arcpy.Parameter(
+            displayName="Projet .aprx à analyser (pas le projet ouvert)",
+            name="project",
+            datatype="DEFile",
+            parameterType="Required",
+            direction="Input")
+        project.filter.list = ["aprx"]
+        hinted(project,
+               "Sélectionnez un .aprx différent de celui qui est ouvert dans "
+               "cette session ArcGIS Pro.",
+               "<p><b>À quoi ça sert</b> : choisir précisément le projet à "
+               "diagnostiquer, au lieu d'analyser les projets récents ou le "
+               "projet actif.</p><p><b>Obligatoire</b> : un fichier "
+               "<code>.aprx</code>. Le projet actuellement ouvert est refusé, "
+               "même si vous demandez seulement un diagnostic.</p>"
+               "<p>L'outil travaille sur une <b>copie instantanée temporaire"
+               "</b>. Si le fichier change pendant cette copie, l'analyse est "
+               "abandonnée pour ne pas mélanger deux enregistrements.</p>"
+               "<p><b>Exemple</b> : <code>C:\\GIS\\Anciens\\Parcelles.aprx</code>."
+               " Vous pouvez laisser un autre projet ouvert dans Pro.</p>")
+
+        out = arcpy.Parameter(
+            displayName="Dossier des rapports",
+            name="output_folder",
+            datatype="DEFolder",
+            parameterType="Optional",
+            direction="Input")
+        out.value = os.path.join(
+            arcpy.env.scratchFolder or os.environ.get("TEMP") or ".",
+            "ArcGISPro_PerformanceAnalyser")
+        hinted(out,
+               "Dossier local où écrire le HTML, le JSON et le TXT.",
+               "<p><b>À quoi ça sert</b> : recevoir les trois rapports. Ce "
+               "dossier ne reçoit <b>pas</b> la copie de récupération du "
+               "projet.</p><p><b>Défaut</b> : <code>&lt;scratch&gt;\\ArcGISPro_"
+               "PerformanceAnalyser</code>.</p><p>La copie .aprx est écrite "
+               "<b>à côté de l'original</b> pour préserver les chemins relatifs "
+               "des données. Son nom reçoit un suffixe explicite et un fichier "
+               "existant n'est jamais écrasé.</p>")
+
+        repair = arcpy.Parameter(
+            displayName="Action de récupération sur une copie",
+            name="repair_mode",
+            datatype="GPString",
+            parameterType="Optional",
+            direction="Input")
+        repair.value = RECOVERY_NONE
+        repair.filter.type = "ValueList"
+        repair.filter.list = [RECOVERY_NONE, RECOVERY_REPACK, RECOVERY_VIEWS,
+                              RECOVERY_VIEWS_HISTORY]
+        repair.category = "Récupération — jamais sur l'original"
+        hinted(repair,
+               "Diagnostic seul par défaut. Les autres choix créent un nouveau "
+               ".aprx à côté de l'original.",
+               "<p><b>À quoi ça sert</b> : tenter une récupération ciblée "
+               "<b>sans jamais réécrire le projet d'origine</b>.</p>"
+               "<ul><li><b>Diagnostic uniquement</b> (défaut) : aucun nouveau "
+               "projet.</li><li><b>Reconstruire le conteneur</b> : réécrit le "
+               "ZIP sans changer les documents ; utile seulement si tous les "
+               "éléments sont lisibles.</li><li><b>Sans vues au démarrage</b> : "
+               "retire <code>views</code> et <code>viewLayoutXML</code> de la "
+               "copie pour ne pas rouvrir une carte ou mise en page qui fait "
+               "planter Pro. Les définitions des cartes et mises en page sont "
+               "conservées.</li><li><b>Sans vues ni historique</b> : retire "
+               "aussi les éléments <code>GPHistory</code> de la copie.</li></ul>"
+               "<p><b>Garanties</b> : intégrité revérifiée avant de nommer la "
+               "copie, aucun écrasement, original intact. La récupération est "
+               "refusée si les contrôles nécessaires ne sont pas Conforme. "
+               "Elle ne garantit pas de réparer toutes les corruptions.</p>")
+
+        verbose = arcpy.Parameter(
+            displayName="Inclure les preuves détaillées",
+            name="verbose",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        verbose.value = False
+        hinted(verbose,
+               "Ajoute les valeurs attendues et preuves techniques au TXT.",
+               "<p><b>À quoi ça sert</b> : conserver les détails nécessaires "
+               "à un ticket de support.</p><p><b>Défaut</b> : décoché. Les "
+               "explications, impacts et étapes restent affichés dans tous "
+               "les cas.</p><p><b>Exemple</b> : cochez avant d'envoyer le "
+               "rapport à Esri ou à votre administrateur SIG.</p>")
+
+        text = arcpy.Parameter(
+            displayName="Écrire aussi le rapport texte",
+            name="write_text",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        text.value = True
+        hinted(text,
+               "Ajoute un TXT contenant les mêmes étapes de correction.",
+               "<p><b>À quoi ça sert</b> : copier facilement le diagnostic "
+               "dans un ticket ou un courriel.</p><p><b>Défaut</b> : coché. "
+               "Le HTML et le JSON sont écrits dans tous les cas.</p>")
+
+        browser = arcpy.Parameter(
+            displayName="Ouvrir le rapport HTML",
+            name="open_browser",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        browser.value = True
+        hinted(browser,
+               "Ouvre le rapport à la fin de l'analyse.",
+               "<p><b>À quoi ça sert</b> : lire immédiatement les explications "
+               "et les étapes numérotées.</p><p><b>Défaut</b> : coché. Le "
+               "chemin du fichier reste affiché même si le navigateur ne "
+               "s'ouvre pas.</p>")
+
+        html_out = arcpy.Parameter(
+            displayName="Rapport HTML du projet",
+            name="html_report",
+            datatype="GPString",
+            parameterType="Derived",
+            direction="Output")
+        hinted(html_out,
+               "Sortie dérivée : chemin du rapport HTML.",
+               "<p><b>À quoi ça sert</b> : chaîner le rapport dans un modèle. "
+               "Ne renseignez pas cette sortie vous-même.</p>")
+
+        recovered = arcpy.Parameter(
+            displayName="Projet de récupération créé",
+            name="recovered_project",
+            datatype="DEFile",
+            parameterType="Derived",
+            direction="Output")
+        hinted(recovered,
+               "Sortie dérivée : nouveau .aprx, vide en diagnostic seul.",
+               "<p><b>À quoi ça sert</b> : retrouver la copie créée et la "
+               "chaîner à un autre outil.</p><p>Elle reste vide en diagnostic "
+               "seul, si aucune modification n'est nécessaire, ou si les "
+               "contrôles de sécurité refusent la récupération.</p>")
+        return [project, out, repair, verbose, text, browser, html_out, recovered]
+
+    def isLicensed(self):
+        return True
+
+    def updateParameters(self, parameters):
+        return
+
+    def updateMessages(self, parameters):
+        path = parameters[0].valueAsText.strip()
+        if path and not path.lower().endswith(".aprx"):
+            parameters[0].setErrorMessage(
+                "Sélectionnez un fichier portant l'extension .aprx.")
+        elif path and not os.path.isfile(path):
+            parameters[0].setErrorMessage(
+                "Le fichier sélectionné est introuvable ou inaccessible : %s" % path)
+        current = _current_project_path()
+        if path and _same_path(path, current):
+            parameters[0].setErrorMessage(
+                "Ce .aprx est le projet actuellement ouvert. Enregistrez-le, "
+                "ouvrez un autre projet, puis sélectionnez à nouveau ce fichier "
+                "ou utilisez une copie. L'outil refuse le projet actif.")
+        mode = parameters[2].valueAsText or RECOVERY_NONE
+        if mode not in RECOVERY_MODES:
+            parameters[2].setErrorMessage(
+                "Choisissez une des quatre actions proposées dans la liste.")
+        elif mode != RECOVERY_NONE:
+            parameters[2].setWarningMessage(
+                "L'original restera intact. La récupération crée un nouveau "
+                "fichier à côté de lui et seulement si les contrôles d'intégrité "
+                "l'autorisent.")
+        if mode == RECOVERY_VIEWS_HISTORY:
+            parameters[0].setWarningMessage(
+                "L'historique de géotraitement sera retiré de la copie seulement. "
+                "Conservez l'original pour retrouver les anciens paramètres.")
+        return
+
+    def execute(self, parameters, messages):
+        path = parameters[0].valueAsText.strip()
+        current = _current_project_path()
+        if not path or not path.lower().endswith(".aprx"):
+            raise arcpy.ExecuteError("Un fichier .aprx doit être sélectionné.")
+        if _same_path(path, current):
+            raise arcpy.ExecuteError(
+                "Le projet actif ne peut pas être analysé par cet outil. "
+                "Ouvrez un autre projet ou sélectionnez une copie.")
+        mode_label = parameters[2].valueAsText or RECOVERY_NONE
+        if mode_label not in RECOVERY_MODES:
+            raise arcpy.ExecuteError("Action de récupération inconnue.")
+        mode = RECOVERY_MODES[mode_label]
+        folder = (parameters[1].valueAsText or os.path.join(
+            os.environ.get("TEMP") or ".", "ArcGISPro_PerformanceAnalyser"))
+        verbose = bool(parameters[3].value)
+
+        messages.addMessage("Analyse du projet externe : %s" % path)
+        messages.addMessage("Copie instantanée temporaire ; projet actif et "
+                            "fichier source non modifiés par le diagnostic.")
+        messages.addMessage("Action : %s" % mode_label)
+        started = time.time()
+        document = engine.run_project(engine.Env(), {
+            "project_path": path, "repair": mode})
+        code = engine.exit_code(document["checks"])
+        document["exit_code"] = code
+        messages.addMessage("%d contrôles en %.1f s."
+                            % (len(document["checks"]), time.time() - started))
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        base = "diagnostic_projet_%s.html" % _safe_stem(path)
+        html_path = _unique(os.path.join(folder, base))
+        json_path = os.path.splitext(html_path)[0] + ".json"
+        meta = {"Projet analysé": path,
+                "Action demandée": mode_label,
+                "Méthode": "copie instantanée locale ; original jamais réécrit"}
+        release = _pro_release()
+        if release:
+            meta["ArcGIS Pro"] = release
+        report.write_html(document, html_path, verbose, code, meta)
+        handle = open(json_path, "wb")
+        try:
+            import json as _json
+            handle.write(_json.dumps(document, indent=1, sort_keys=True)
+                         .encode("utf-8"))
+        finally:
+            handle.close()
+        written = [html_path, json_path]
+        if parameters[4].value:
+            text_path = os.path.splitext(html_path)[0] + ".txt"
+            handle = open(text_path, "wb")
+            try:
+                handle.write(("\n".join(engine.render(document, verbose))
+                              + "\n").encode("utf-8"))
+            finally:
+                handle.close()
+            written.append(text_path)
+
+        for status, count in engine.counts(document["checks"]):
+            if count:
+                messages.addMessage("  %-8s %d" % (status.upper(), count))
+        _emit_findings(document, messages)
+        for note in document["notes"]:
+            if "REFUSÉE" in note or "ÉCHEC" in note:
+                messages.addWarningMessage(note)
+            else:
+                messages.addMessage(note)
+        for record in document["applied"]:
+            messages.addWarningMessage(
+                "COPIE CRÉÉE [%s] %s\n%s\nRetour arrière : %s"
+                % (record["id"], record["what"], record["result"],
+                   record["undo"]))
+        for written_path in written:
+            messages.addMessage("  report: %s" % written_path)
+        parameters[6].value = html_path
+        parameters[7].value = document.get("recovery", {}).get("path") or ""
+
+        if parameters[5].value:
+            try:
+                import webbrowser
+                webbrowser.open("file:///" + html_path.replace("\\", "/"))
+                messages.addMessage("Rapport HTML ouvert dans le navigateur.")
+            except Exception as exc:
+                messages.addWarningMessage(
+                    "Ouverture du navigateur impossible (%s). Rapport : %s"
+                    % (exc, html_path))
+        messages.addMessage("Le rapport contient des chemins et noms de couches. "
+                            "Relisez-le avant de le transmettre.")
+        messages.addMessage("Code de sortie %d : %s"
                             % (code, report.EXIT_MEANING.get(code, "?")))
         return

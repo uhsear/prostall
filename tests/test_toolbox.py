@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import types
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOXDIR = os.path.join(ROOT, "ArcGISPro_PerformanceAnalyser")
@@ -63,6 +64,7 @@ class _Parameter(object):
         self.value = None
         self.errors = []
         self.warnings = []
+        self.filter = types.SimpleNamespace(type=None, list=[])
 
     @property
     def valueAsText(self):
@@ -186,6 +188,10 @@ def hostile_document():
         record["title"] = payload
         record["fix"] = payload
         record["detail"] = payload
+        record["explanation"] = payload
+        record["impact_fr"] = payload
+        record["steps"] = [payload, payload]
+        record["verification"] = payload
     document["notes"] = [payload]
     document["applied"] = [{"id": "AP-99", "what": payload, "result": payload,
                             "undo": payload, "when": payload}]
@@ -223,7 +229,7 @@ check("<script>alert(1)</script>" not in page,
       "a payload in the account name, titles, evidence, notes and undo "
       "commands never reaches the page as markup")
 check("<svg/onload=alert(3)>" not in page,
-      "nor as an element, in any of the six places a machine string lands")
+      "nor as an element in the evidence, guidance, steps or verification")
 check("&lt;script&gt;alert(1)&lt;/script&gt;" in page,
       "it is on the page as escaped text, so the operator still sees the "
       "value the machine reported instead of losing it")
@@ -426,7 +432,7 @@ check(derived == manual,
       "nothing is inferred about a symptom a check did not name")
 check(all(("<b>%s</b>" % code) in html_report.render_html(doc)
           for code, _l in engine.SYMPTOMS),
-      "all five symptoms have a row, including the ones nothing flagged, so a "
+      "all six symptoms have a row, including the ones nothing flagged, so a "
       "zero is visible rather than missing")
 check('href="#check-%s"' % doc["act_first"][0] in html_report.render_html(doc),
       "a flagged check links to its own anchor on the page")
@@ -470,11 +476,10 @@ print("-" * 70)
 print("the .pyt loads and its tools are what ArcGIS Pro will see")
 pyt = load_pyt()
 box = pyt.Toolbox()
-check(box.alias == "properf" and len(box.tools) == 1,
-      "the toolbox exposes exactly one tool: the offline self-test was "
-      "dropped from the pane because a second tool that is not a "
-      "diagnostic of the workstation only invites the wrong one to be "
-      "run. It stays on the command line as --self-test")
+check(box.alias == "properf" and len(box.tools) == 2
+      and box.tools == [pyt.Diagnose, pyt.AnalyzeProject],
+      "the toolbox exposes the workstation diagnostic and the separate "
+      "selected-project diagnostic; the offline self-test stays out of the pane")
 check(box.canRunInBackground is False,
       "neither runs in the background: the diagnostic reads the session it "
       "runs in, and DL-12 asks whether Pro is open")
@@ -639,6 +644,306 @@ try:
           "only the messages can tell a lost-edits finding from a clean run")
     check(any(l.startswith("APPLIED") for l in m4.warn) is False,
           "and still nothing was applied, with the fixes unticked")
+finally:
+    shutil.rmtree(folder, ignore_errors=True)
+
+# =============================================================================
+# SELECTED .APRX ANALYSIS, RECOVERY COPIES AND THE SECOND TOOL
+# =============================================================================
+
+
+def make_aprx(path, main_override=None, map_override=None):
+    """Write a small Pro-3-shaped project with a view and one history item."""
+    import zipfile
+    main = {
+        "type": "CIMGISProject",
+        "defaultFolder": ".",
+        "defaultGeoDatabase": "data.gdb",
+        "views": [{"type": "CIMLayoutView",
+                   "viewableObjectPath": "CIMPATH=Layout/layout.json",
+                   "viewType": "esri_layouts_layoutPane"}],
+        "viewLayoutXML": "<esriPaneState>layout active</esriPaneState>",
+        "projectItems": [
+            {"type": "CIMProjectItem", "itemType": "GPHistory",
+             "name": "Buffer", "propertiesXML": "<process/>"},
+            {"type": "CIMProjectItem", "itemType": "Map",
+             "name": "Map", "catalogPath": "CIMPATH=Map/map.json"},
+        ],
+    }
+    if main_override is not None:
+        main = main_override
+    map_doc = {
+        "type": "CIMMapDocument",
+        "map": {"type": "CIMMap", "name": "Map",
+                "spatialReference": {"wkid": 4326},
+                "layers": [{
+                    "type": "CIMFeatureLayer", "name": "Parcels",
+                    "spatialReference": {"wkid": 4326},
+                    "refreshRate": 30,
+                    "featureTable": {"dataConnection": {
+                        "workspaceConnectionString":
+                            "PASSWORD=do-not-report;DATABASE=data.gdb;USER=gis",
+                        "dataset": "Parcels"}}}]},
+    }
+    if map_override is not None:
+        map_doc = map_override
+    layout = {"type": "CIMLayout", "name": "Layout"}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("GISProject.json", json.dumps(main))
+        archive.writestr("Map/map.json", json.dumps(map_doc))
+        archive.writestr("Layout/layout.json", json.dumps(layout))
+        archive.writestr("DocumentInfo.xml", "<DocumentInfo/>")
+
+
+print("-" * 70)
+print("selected project: analysis is structured, snapshot-based and read-only")
+folder = tempfile.mkdtemp(prefix="properf-project-")
+try:
+    source = os.path.join(folder, "CrashOnOpen.aprx")
+    os.mkdir(os.path.join(folder, "data.gdb"))
+    make_aprx(source)
+    original = open(source, "rb").read()
+    before_names = sorted(os.listdir(folder))
+    document = engine.run_project(engine.Env(), {
+        "project_path": source, "repair": "none"})
+    check(document["analysis_type"] == "project"
+          and document["project"] == source and len(document["checks"]) == 11,
+          "the selected-project run has its own report type and eleven checks")
+    check(open(source, "rb").read() == original
+          and sorted(os.listdir(folder)) == before_names,
+          "diagnostic-only mode leaves the source byte-identical and creates no project")
+    by_id_project = dict((c["id"], c) for c in document["checks"])
+    check(by_id_project["PR-01"]["status"] == "Pass"
+          and by_id_project["PR-02"]["status"] == "Pass"
+          and by_id_project["PR-05"]["status"] == "Info",
+          "ZIP/CRC and JSON are validated, while a saved layout view is Info, not a false anomaly")
+    check("1 vue(s)" in by_id_project["PR-05"]["observed"]
+          and "GPHistory" not in by_id_project["PR-05"]["observed"],
+          "the startup-state check reports the saved view without inventing a fault")
+    check(by_id_project["PR-04"]["status"] == "Pass",
+          "a relative DATABASE path is resolved against the original project folder, not the snapshot")
+    check(all(c.get("explanation") and c.get("impact_fr")
+              and c.get("steps") and c.get("verification")
+              for c in document["checks"]),
+          "every project check carries a French explanation, ArcGIS impact, ordered actions and verification")
+    parsed = engine._parse(["--project", source, "--project-repair", "views"])
+    check(parsed.project == source and parsed.project_repair == "views"
+          and engine._parse(["--project", source]).project_repair == "none",
+          "the CLI exposes selected-project analysis with repair off by default")
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    try:
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        cli_code = engine.main(["--project", source, "--json"])
+        cli_out = sys.stdout.getvalue()
+        cli_err = sys.stderr.getvalue()
+    finally:
+        sys.stdout, sys.stderr = old_stdout, old_stderr
+    check(cli_code == 1 and json.loads(cli_out)["analysis_type"] == "project"
+          and not cli_err,
+          "the CLI project mode emits one clean JSON document and its measured exit code")
+    try:
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        usage_code = engine.main(["--project-repair", "views"])
+    finally:
+        sys.stdout, sys.stderr = old_stdout, old_stderr
+    check(usage_code == 64,
+          "--project-repair without --project is usage error 64, never an armed repair")
+    check("do-not-report" not in json.dumps(document),
+          "connection-string credentials never reach the project report")
+    check(engine._database_path("SERVER=db01;DATABASE=gis;USER=editor") is None
+          and engine._database_path("SERVER=db01;DATABASE=..\\data.gdb")
+          == "..\\data.gdb",
+          "an enterprise DATABASE name is not misreported as a missing relative file")
+    project_page = html_report.render_html(document, exit_code=1,
+                                            meta={"Projet analysé": source})
+    check("Diagnostic d&#x27;un projet .aprx externe" in project_page
+          and "Impact concret sur" in project_page
+          and "Actions &agrave; prendre" in project_page
+          and "V&eacute;rification apr&egrave;s correction" in project_page,
+          "the HTML explains the problem, its ArcGIS impact, the actions and the after-check")
+    check("CrashOnOpen.aprx" in project_page and "Comment lire et corriger" in project_page,
+          "the report names the selected file and opens with a reading procedure")
+
+    print("-" * 70)
+    print("selected project: recovery changes only a verified new copy")
+    recovered = engine.run_project(engine.Env(), {
+        "project_path": source, "repair": "views_history"})
+    output = recovered["recovery"]["path"]
+    check(recovered["recovery"]["status"] == "created" and output
+          and os.path.isfile(output) and output != source,
+          "views_history creates a separate recovery .aprx beside the source")
+    check(open(source, "rb").read() == original,
+          "and the original is still byte-identical after the repair")
+    inspected = engine.inspect_aprx_archive(output)
+    main = inspected["main"]
+    check(inspected["integrity"] == "Pass" and "views" not in main
+          and "viewLayoutXML" not in main,
+          "the output passes CRC again and has no startup view or pane state")
+    check(not [i for i in main["projectItems"] if i.get("itemType") == "GPHistory"]
+          and [i for i in main["projectItems"] if i.get("itemType") == "Map"],
+          "history is removed while the map project item remains")
+    with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
+        check(before.read("Map/map.json") == after.read("Map/map.json")
+              and before.read("Layout/layout.json") == after.read("Layout/layout.json"),
+              "map and layout definitions are byte-identical: only startup state/history changed")
+    second = engine.run_project(engine.Env(), {
+        "project_path": source, "repair": "views_history"})
+    second_output = second["recovery"]["path"]
+    check(second_output != output and os.path.isfile(second_output)
+          and os.path.isfile(output),
+          "a second recovery in the same second never overwrites the first copy")
+
+    repacked = engine.run_project(engine.Env(), {
+        "project_path": source, "repair": "repack"})
+    repacked_path = repacked["recovery"]["path"]
+    with zipfile.ZipFile(source) as before, zipfile.ZipFile(repacked_path) as after:
+        same = before.namelist() == after.namelist() and all(
+            before.read(name) == after.read(name) for name in before.namelist())
+    check(same and "views" in engine.inspect_aprx_archive(repacked_path)["main"],
+          "repack reconstructs only the container and preserves every document, including views")
+
+    print("-" * 70)
+    print("selected project: unsafe recovery is refused, never guessed")
+    bad = os.path.join(folder, "Broken.aprx")
+    open(bad, "wb").write(b"this is not a zip archive")
+    bad_before = open(bad, "rb").read()
+    broken = engine.run_project(engine.Env(), {
+        "project_path": bad, "repair": "views"})
+    check(engine.by_id(broken["checks"], "PR-01")["status"] == "Fail"
+          and broken["recovery"]["status"] == "refused"
+          and open(bad, "rb").read() == bad_before,
+          "an invalid ZIP is a measured integrity anomaly and views recovery is refused")
+    bad_json = os.path.join(folder, "BrokenJson.aprx")
+    with zipfile.ZipFile(bad_json, "w") as archive:
+        archive.writestr("GISProject.json", "{not valid json")
+        archive.writestr("Map/map.json", "{}")
+    broken_json = engine.run_project(engine.Env(), {
+        "project_path": bad_json, "repair": "views_history"})
+    check(engine.by_id(broken_json["checks"], "PR-01")["status"] == "Pass"
+          and engine.by_id(broken_json["checks"], "PR-02")["status"] == "Fail"
+          and broken_json["recovery"]["status"] == "refused",
+          "ZIP integrity and JSON validity stay distinct, and malformed JSON blocks modification")
+    missing = engine.run_project(engine.Env(), {
+        "project_path": os.path.join(folder, "Missing.aprx"), "repair": "none"})
+    check(engine.by_id(missing["checks"], "PR-01")["status"] == "Info"
+          and missing["applied"] == [],
+          "a missing file produces an honest undetermined report, not a traceback or a repair")
+    changing = os.path.join(folder, "Changing.aprx")
+    make_aprx(changing)
+    real_copyfile = shutil.copyfile
+    def copy_then_change(src, dst):
+        real_copyfile(src, dst)
+        with open(src, "ab") as handle:
+            handle.write(b"changed after snapshot")
+    try:
+        shutil.copyfile = copy_then_change
+        changed_snapshot, changed_info = engine.prepare_project_snapshot(changing)
+    finally:
+        shutil.copyfile = real_copyfile
+    if changed_snapshot and os.path.exists(changed_snapshot):
+        os.unlink(changed_snapshot)
+    check(changed_snapshot is None
+          and "a changé pendant la copie" in changed_info["integrity_reason"],
+          "a source modified during the snapshot is rejected instead of mixing two saves")
+    check(engine.project_recovery_problem(
+        "views", recovered["checks"], {"main": {"views": [],
+        "projectItems": []}}) is not None,
+        "a no-op recovery is not presented as a useful repair")
+finally:
+    shutil.rmtree(folder, ignore_errors=True)
+
+print("-" * 70)
+print("the ArcGIS Pro selected-project tool")
+project_tool = pyt.AnalyzeProject()
+project_params = project_tool.getParameterInfo()
+project_names = [p.name for p in project_params]
+check(project_names == ["project", "output_folder", "repair_mode", "verbose",
+                        "write_text", "open_browser", "html_report",
+                        "recovered_project"],
+      "the second tool exposes project selection, recovery and two derived outputs")
+check(project_params[2].value == pyt.RECOVERY_NONE
+      and len(project_params[2].filter.list) == 4
+      and project_params[6].direction == "Output"
+      and project_params[7].direction == "Output",
+      "recovery is off by default, has four explicit choices, and returns HTML/project paths")
+check(all((p.helpMessage or "").strip() and "À quoi ça sert" in (p.parameterHelp or "")
+          for p in project_params),
+      "every project-tool parameter has a French tooltip and purpose paragraph")
+check(project_tool.canRunInBackground is False,
+      "the selected-project tool also runs in the foreground")
+
+folder = tempfile.mkdtemp(prefix="properf-project-tool-")
+try:
+    source = os.path.join(folder, "External.aprx")
+    os.mkdir(os.path.join(folder, "data.gdb"))
+    make_aprx(source)
+    original = open(source, "rb").read()
+    reports = os.path.join(folder, "reports")
+    old_mp = getattr(pyt.arcpy, "mp", None)
+    try:
+        pyt.arcpy.mp = types.SimpleNamespace(
+            ArcGISProject=lambda _current: types.SimpleNamespace(filePath=source))
+        active = pyt.AnalyzeProject()
+        active_params = active.getParameterInfo()
+        active_params[0].value = source
+        active.updateMessages(active_params)
+        check(bool(active_params[0].errors)
+              and "actuellement ouvert" in active_params[0].errors[0],
+              "the parameter validator refuses the project currently open in Pro")
+        refused = False
+        try:
+            active.execute(active_params, _Messages())
+        except pyt.arcpy.ExecuteError:
+            refused = True
+        check(refused, "execute refuses the active project too, not only updateMessages")
+
+        pyt.arcpy.mp = types.SimpleNamespace(
+            ArcGISProject=lambda _current: types.SimpleNamespace(
+                filePath=os.path.join(folder, "Another.aprx")))
+        fresh_project = pyt.AnalyzeProject()
+        pp = fresh_project.getParameterInfo()
+        pp[0].value = source
+        pp[1].value = reports
+        pp[5].value = False
+        pm = _Messages()
+        fresh_project.execute(pp, pm)
+        check(pp[6].value and os.path.isfile(pp[6].value)
+              and os.path.isfile(os.path.splitext(pp[6].value)[0] + ".json")
+              and os.path.isfile(os.path.splitext(pp[6].value)[0] + ".txt"),
+              "execute writes HTML, JSON and TXT for an external project while another is open")
+        check(pp[7].value == "" and open(source, "rb").read() == original
+              and not pm.err,
+              "the default toolbox run creates no recovery project and preserves the source")
+        body = io.open(pp[6].value, encoding="utf-8").read()
+        check("External.aprx" in body and "copie instantan" in body
+              and "Actions &agrave; prendre" in body,
+              "the generated toolbox report identifies the file and carries the ordered guidance")
+        check(any("Copie instantanée" in line for line in pm.info)
+              and any("Pourquoi" in line for line in pm.info)
+              and any("Étape 1" in line for line in pm.info),
+              "the geoprocessing pane itself explains findings and their first action")
+
+        fresh_recovery = pyt.AnalyzeProject()
+        rp = fresh_recovery.getParameterInfo()
+        rp[0].value = source
+        rp[1].value = reports
+        rp[2].value = pyt.RECOVERY_VIEWS_HISTORY
+        rp[5].value = False
+        rm = _Messages()
+        fresh_recovery.execute(rp, rm)
+        check(rp[7].value and os.path.isfile(rp[7].value)
+              and rp[7].value != source and open(source, "rb").read() == original,
+              "the toolbox returns the recovery path and never rewrites the original")
+        check(any("COPIE CRÉÉE" in line for line in rm.warn),
+              "the successful recovery and its rollback meaning are visible in Pro messages")
+    finally:
+        if old_mp is None:
+            try:
+                del pyt.arcpy.mp
+            except AttributeError:
+                pass
+        else:
+            pyt.arcpy.mp = old_mp
 finally:
     shutil.rmtree(folder, ignore_errors=True)
 

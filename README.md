@@ -268,6 +268,22 @@ python arcgis_pro_performance_analyser.py --sde-server gisdb01 --portal gis.exam
 
 That adds two bounded TCP probes and writes the report as text and as JSON.
 
+To analyse **one explicitly selected project**, including while another project is open in Pro:
+
+```
+python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\Broken.aprx --report C:\\Temp\\properf
+```
+
+The selected file is copied to a temporary local snapshot first. Its ZIP members are read to EOF and CRC-checked, its JSON documents are parsed, and the report explains each finding in French with its ArcGIS Pro impact, ordered remediation steps and a verification procedure. The source is not rewritten.
+
+For a project that crashes while restoring a map or layout view, create a **separate recovery copy**:
+
+```
+python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\Broken.aprx --project-repair views --report C:\\Temp\\properf
+```
+
+This writes `Broken_recuperation_sans_vues.aprx` beside the original. It removes only the saved `views` and `viewLayoutXML` startup state from the copy; map and layout definitions remain in the project. Use `views_history` to remove geoprocessing history from the copy as well, or `repack` to rebuild only the ZIP container with every document unchanged. The original is never overwritten.
+
 ## Usage
 
 | Flag | Default | What it does |
@@ -275,12 +291,14 @@ That adds two bounded TCP probes and writes the report as text and as JSON.
 | `--self-test` | off | Run the offline assertions and exit. Wins over every other flag. |
 | `--verbose` | off | Print the expected text and the evidence lines as well. |
 | `--json` | off | Print the report as JSON on stdout instead of the console form. Stdout is that one document and nothing else, also with `--report`. |
-| `--report DIR` | none | Write the text and JSON reports into this directory, creating it. This is the one write besides `--apply`. Without it nothing is written. |
+| `--report DIR` | none | Write the text and JSON reports into this directory, creating it. Without it, only an explicit `--apply` or `--project-repair` can write anything. |
 | `--sde-server HOST` | none | TCP-probe this geodatabase host. Connect only, no credential. Without it the probe is skipped. A URL, a path or a space in the value is refused with exit 64. |
 | `--sde-port PORT` | `1433` | Port for that probe. |
 | `--portal HOST` | none | TCP-probe this portal host on 443. Without it the probe is skipped. Refused like `--sde-server`. |
 | `--timeout MS` | `4000` | Bound on each network probe. |
-| `--apply` | off | Run the gated fixes. Each is refused unless its check actually failed, prints its own undo, and never deletes anything. |
+| `--project APRX` | none | Run the eleven-check selected-project analysis instead of the workstation analysis. Uses a snapshot; safe to use while another project is open. |
+| `--project-repair MODE` | `none` | With `--project`: `repack`, `views`, or `views_history`. Writes a verified new copy beside the source, never overwrites the source. `--apply` cannot be combined with this mode. |
+| `--apply` | off | Run the gated workstation fixes. Each is refused unless its check actually failed, prints its own undo, and never deletes anything. |
 
 Every parser error is exit 64, including a refused abbreviation such as `--ap`. No abbreviation is
 accepted, so a prefix of `--apply` cannot arm the fix path.
@@ -347,6 +365,37 @@ which is the failure this tool refuses to cause. All five are refused together w
 PF-07 keeps its performance id and runs in the data-loss block on purpose. An earlier version
 reported those folders as a count and a size and called it disk churn, which routed a possible
 recovery lead for the lost work into the performance section and out of the act-first list.
+
+### Explicitly selected `.aprx`: eleven checks and safe recovery copies
+
+`--project` and the toolbox tool **Analyser un projet .aprx externe** are separate from the
+workstation scan above. They analyse the file the operator chose, not the active project and not a
+recent-project list. The toolbox rejects `ArcGISProject("CURRENT").filePath` when it is the same
+file. A local temporary snapshot is analysed instead, and a source whose size or modification time
+changes during that snapshot is rejected.
+
+| Id | What the selected-project run measures |
+|---|---|
+| PR-01 | File size, ZIP readability, duplicate/encrypted entries and a full streaming CRC check, all bounded. Invalid integrity is `Fail`; an unreadable or over-budget file is `Info` and cannot arm a repair. |
+| PR-02 | Presence and validity of `GISProject.json`, plus syntax/encoding of the other JSON documents. Pro 2.x XML is reported as unsupported for JSON recovery rather than modified. |
+| PR-03 | Project, home-folder and default-geodatabase storage class: local, network or OneDrive. |
+| PR-04 | Existence of path-shaped local file sources, resolved against the original project folder. Remote sources are named but never contacted. An enterprise `DATABASE=gis` name is not mistaken for a relative file, and connection credentials are never printed. |
+| PR-05 | Saved `views` and `viewLayoutXML`, including layout views. Their presence is normally `Info`, not a false anomaly. |
+| PR-06 | Geoprocessing-history item count and approximate JSON weight. The warning thresholds are this tool's, not an Esri limit. |
+| PF-10, PF-22, PF-09, PF-01, PF-14 | Project weight, refresh timers/default geodatabase, service layers, on-the-fly projection and per-layer draw load, using the same measured decision functions as the workstation scan. |
+
+Recovery is a separate opt-in and always writes **beside the source**, preserving relative data
+paths. `repack` requires PR-01 Pass and preserves every document byte-for-byte after decompression.
+`views` and `views_history` additionally require PR-02 Pass and the expected CIM list shapes. They
+remove startup view/pane state from `GISProject.json`; `views_history` also filters `GPHistory`
+items. They do **not** delete map or layout definitions. The output is reopened, fully CRC-checked,
+its modified JSON is verified, and only then does it receive its final unique filename. A temporary
+output that fails verification is discarded; the source is never touched.
+
+This can bypass a crash loop caused by restoring a problematic view, and can reduce a bloated
+history. It does not claim to repair every corrupt CIM document, missing dataset, incompatible
+add-in, driver fault or damaged geodatabase. For those, the report gives manual steps and says when
+restoring a backup or contacting Esri is the safe action.
 
 ### How the newer checks stay honest
 
@@ -417,7 +466,7 @@ enforced rather than documented:
 | Code | Means |
 |---|---|
 | 0 | Nothing to act on, and at least one check other than DL-00 and DL-12 passed. |
-| 1 | Performance findings, none of them bearing on lost edits. |
+| 1 | Measured workstation or project findings, none bearing on lost edits. |
 | 2 | At least one finding bearing on lost edits. |
 | 3 | No finding, and nothing was determined either. |
 | 64 | A usage error, or `--report` could not write its files. |
@@ -448,11 +497,11 @@ report success while changing nothing for the editor.
 AP-01 renames. It does not delete. A diagnostic that deletes a folder is how the last copy of
 something disappears, and the undo is a single `move` back.
 
-Nothing else is automated, on purpose. OneDrive redirection, the project location, the power plan,
-Defender, the adapter power setting, the SMB client, the project file, dump collection and anything
-inside a geodatabase are reported and never touched. Those
-are policy decisions or reviewed operator actions, and a script that makes them for you is a script
-nobody will run twice.
+Nothing else is automated in the workstation run, on purpose. OneDrive redirection, the project
+location, the power plan, Defender, the adapter power setting, the SMB client, dump collection and
+anything inside a geodatabase are reported and never touched. Those are policy decisions or
+reviewed operator actions. The selected-project recovery described above is a separate mode: it
+can write a new `.aprx` copy, but never changes the selected source or any geodatabase.
 
 ## Output
 
@@ -461,7 +510,7 @@ findings to act on first. `--report` writes the same thing as text, plus a JSON 
 
 ```json
 {
- "report_version": 3,
+ "report_version": 4,
  "taken": "2026-09-17 20:59",
  "user": "editor",
  "elevated": false,
@@ -474,7 +523,8 @@ findings to act on first. `--report` writes the same thing as text, plus a JSON 
  "checks": [{"id": "DL-06", "category": "Storage", "status": "Fail", "dataloss": true,
              "title": "Documents redirected into OneDrive (Known Folder Move)",
              "observed": "...", "expected": "...", "impact": "...", "fix": "...",
-             "autofixable": false, "detail": ""}]
+             "explanation": "...", "impact_fr": "...", "steps": ["...", "..."],
+             "verification": "...", "autofixable": false, "detail": ""}]
 }
 ```
 
@@ -490,20 +540,21 @@ empty unless `--apply` was given, and the self-test asserts that across a whole 
 
 ## ArcGIS Pro toolbox, and the HTML report
 
-[`ArcGISPro_PerformanceAnalyser/`](ArcGISPro_PerformanceAnalyser/LISEZMOI.md) is this same
-diagnostic as an ArcGIS Pro Python Toolbox, rendering the result as one self-contained HTML file.
-It ships as **one file**: the engine and the renderer are inlined into the `.pyt`, so sharing it
+[`ArcGISPro_PerformanceAnalyser/`](ArcGISPro_PerformanceAnalyser/LISEZMOI.md) exposes the
+workstation diagnostic and the selected-project diagnostic as two tools in one ArcGIS Pro Python
+Toolbox, rendering each result as one self-contained HTML file. It ships as **one file**: the
+engine and the renderer are inlined into the `.pyt`, so sharing it
 is copying it. There is no sibling module to keep beside it, and therefore nothing that can go
 missing on the machine it lands on.
 
 | File | What it is |
 |---|---|
-| `ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt` | **The shipped artefact.** One tool, with the engine and the renderer inlined |
+| `ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt` | **The shipped artefact.** Two tools, with the engine and the renderer inlined |
 | `arcgis_pro_performance_analyser.py` | The diagnostic engine and CLI. A single file, no `arcpy` import |
 | `html_report.py` | The HTML renderer. A pure function over the report document, no `arcpy` |
 | `toolbox_glue.py` | The ArcGIS Pro glue. The only part that imports `arcpy` |
 | `build_toolbox.py` | Assembles those three into the one `.pyt` |
-| `tests/test_toolbox.py` | 92 assertions over all of it, on a stand-in `arcpy` |
+| `tests/test_toolbox.py` | 129 assertions over the renderer, both tools and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
 
 Install by copying that one `.pyt` anywhere stable, then Catalog pane > Toolboxes > Add Toolbox,
 pointing at it. The tool appears under "ArcGIS Pro Performance Analyser".
@@ -524,10 +575,11 @@ The HTML is one page with no external asset at all, so it opens on a workstation
   undetermined ones, and measurement coverage;
 - **gauges** in inline SVG for the health score, the coverage, free memory, free disk on the worst
   volume, share latency, negotiated link speed and cache size;
-- **flags**, one row per symptom S1-S5, counting the findings whose impact line names that symptom
-  and linking to each of them;
-- every check as a card: status badge, data-loss marker, the detected problem, the impact, and the
-  correction or optimisation beside it, with the expected value and the evidence folded away;
+- **flags**, one row per symptom S1-S6 (including a crash while opening a project), counting the
+  findings whose impact line names that symptom and linking to each of them;
+- every check as a card: status badge, data-loss marker, the measured problem, a plain-French
+  explanation, the concrete ArcGIS Pro impact, ordered remediation steps and an after-fix
+  verification, with the expected value and technical evidence folded away;
 - the fix gates, the undo command of anything applied, a legend, and the JSON document embedded for
   the diff.
 
@@ -535,9 +587,10 @@ A `Content-Security-Policy` header allows no external source.
 
 **Every number on the page comes from a `kpi` mapping the check carried.** Report format 2 added
 that mapping to the checks that measure a number, and `make_check` refuses one that is not a
-mapping of numbers - a string or a boolean is refused. The version reads 3 now, because the
-document's own `prostall` key became `report_version` and a renamed key is a format a consumer
-written against 2 would read wrong. A gauge whose value had been parsed back out of a
+mapping of numbers - a string or a boolean is refused. Report format 4 adds the structured
+`explanation`, `impact_fr`, `steps` and `verification` fields, plus selected-project metadata;
+older consumers can ignore those fields while continuing to read the original evidence. A gauge
+whose value had been parsed back out of a
 sentence would be a number the renderer invented on the way to the page, which is the defect this
 tool exists to prevent, moved downstream. A check that carries no number draws no gauge.
 
@@ -552,12 +605,13 @@ document whose every field is a payload.
 lands in the act-first list, and the five checks that read the project file - PF-01, PF-09, PF-10,
 PF-14 and PF-22 - are refused, because a project file must not be held open while Pro may be
 saving it. AP-01 is refused for the same reason. A run from the Geoprocessing pane is therefore a
-workstation report minus the project-file checks. For the full set, close Pro and run
-`arcgis_pro_performance_analyser.py` in the editor's own session. The page says which of the two
-it was.
+workstation report minus the automatic project-file checks. For that full workstation set, close
+Pro and run `arcgis_pro_performance_analyser.py` in the editor's own session. The separate
+**Analyser un projet .aprx externe** tool is the exception: it can inspect another selected file
+while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
-python tests/test_toolbox.py      # 92 assertions over the renderer, the glue and the built .pyt
+python tests/test_toolbox.py      # 129 assertions over the renderer, both tools and project recovery
 python arcgis_pro_performance_analyser.py --self-test   # 751 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
@@ -577,6 +631,7 @@ may have replaced. Each of these was a real finding, and each is pinned by an as
 | `user.config` parse failure | A file nobody could read printed every setting as `<absent>`, which is a real answer. | A failed read is its own answer. DL-03, PF-05 and PF-08 say the settings are unknown and carry no verdict. |
 | `.aprx` entries | Bounded by the size the zip header claimed, and a corrupt entry raised out of the reader. | Bounded by the bytes actually decompressed, reading to the end so the archive's own checksum runs. One bad entry costs that entry; the survivors still answer. |
 | `.aprx` walk | Recursive. A document nested a thousand deep ended the whole check with a `RecursionError`, and one odd project became "no project was read". | An explicit stack, bounded on depth and node count, with the cap reported as a partial read. |
+| Selected `.aprx` | Reading the chosen file throughout the checks could contend with another session and mix two saves. | A temporary local snapshot, before/after stat comparison, bounded full CRC/JSON checks, no remote source probes, and recovery only into a separately verified copy. |
 | Report filenames | Stamped to the second, so two runs inside one second landed on the same file and the second silently replaced the first. | A name that does not exist yet. |
 | Undo commands | The executable path was interpolated between quotes, so a `"` in `InstallDir` closed the argument early. | Quoted through one helper that refuses a value holding a quote, `&`, `|`, `<`, `>`, `^`, `%` or `!`, and prints the manual route instead. |
 | Child programs | Started by bare name, and Windows searches the current directory first. | Started from `%SystemRoot%\System32` when that path exists. |
@@ -585,10 +640,15 @@ may have replaced. Each of these was a real finding, and each is pinned by an as
 
 ## Limits
 
-- It reads a workstation. It does not read a server. Nothing here opens a geodatabase, runs a
-  query, or signs in to a portal, and the two network probes are TCP connects that send nothing.
-- Off Windows almost every check reports `Info` or `Skipped`, and the run exits 3. That is correct
-  behaviour and not a port: an unreadable registry is not an absent value, and the tool says so rather than guessing.
+- It reads a workstation or the structure of a selected `.aprx`. It does not read a server. Nothing
+  here opens a geodatabase, runs a query, or signs in to a portal, and the two workstation network
+  probes are TCP connects that send nothing. Selected-project source checks never contact remote data.
+- Off Windows almost every workstation check reports `Info` or `Skipped`, and that run exits 3.
+  The selected `.aprx` container/JSON analysis itself is portable. An unreadable registry is not an
+  absent value, and the tool says so rather than guessing.
+- Project recovery is deliberately conservative and is not an ArcGIS Pro runtime certification:
+  the generated ZIP and JSON are verified here, but the final proof is opening the copy in the
+  target ArcGIS Pro release and checking every required map, layout and source.
 - Several readings need Pro's own configuration. Run it in the editor's session. DL-00 exists to
   tell you when you did not.
 - The OneDrive redirection bitmask is printed and deliberately not decoded. The value most guides

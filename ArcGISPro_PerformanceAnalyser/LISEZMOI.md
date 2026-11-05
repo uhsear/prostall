@@ -12,7 +12,7 @@ le poste où le fichier atterrit.
 
 | Fichier | Rôle |
 |---|---|
-| `ArcGISPro_PerformanceAnalyser.pyt` | **L'artefact livré.** Un outil, moteur et rendu inclus |
+| `ArcGISPro_PerformanceAnalyser.pyt` | **L'artefact livré.** Deux outils, moteur et rendu inclus |
 | `arcgis_pro_performance_analyser.py` | Le moteur de diagnostic et sa ligne de commande. Sans `arcpy` |
 | `html_report.py` | Le rendu HTML. Fonction pure sur le document de rapport, sans `arcpy` |
 | `toolbox_glue.py` | L'interface ArcGIS Pro. La seule partie qui importe `arcpy` |
@@ -36,16 +36,17 @@ module, parce que l'une masquerait l'autre silencieusement.
    exemple `C:\GIS\Tools\`.
 2. Dans ArcGIS Pro : volet **Catalogue → Toolboxes → Add Toolbox**, pointer sur
    ce fichier.
-3. L'outil apparaît sous **« ArcGIS Pro Performance Analyser »**.
+3. Les deux outils apparaissent sous **« ArcGIS Pro Performance Analyser »** :
+   **Diagnostiquer la lenteur d'ArcGIS Pro** et **Analyser un projet .aprx externe**.
 
 C'est tout : il n'y a pas d'étape 4. Prérequis : ArcGIS Pro 3.x (Python 3.9+),
 bibliothèque standard uniquement.
 
-## L'outil
+## Les deux outils
 
 ### Diagnostiquer la lenteur d'ArcGIS Pro
 
-**C'est l'outil à lancer.**
+**C'est l'outil à lancer pour analyser tout le poste.**
 
 Lit le poste et écrit `arcgis_pro_performance_analyser_<horodatage>.html`,
 `.json` et `.txt` dans le dossier de sortie, puis ouvre le HTML dans le
@@ -86,6 +87,77 @@ le rapport. Copiez-la avant de fermer la fenêtre.
 Le chemin du HTML est un **paramètre de sortie dérivé** : l'outil peut être
 enchaîné dans un modèle ModelBuilder.
 
+### Analyser un projet .aprx externe
+
+**C'est l'outil à lancer pour un projet précis, y compris un projet qui plante à
+l'ouverture.** Il ne dépend pas de la liste des projets récents et n'ouvre pas le
+projet dans ArcGIS Pro pour l'analyser.
+
+#### Procédure recommandée
+
+1. **Laissez un autre projet ouvert** (ou un projet vide), puis lancez
+   **Analyser un projet .aprx externe**. Le fichier correspondant au projet
+   actuellement ouvert est refusé ; sélectionnez un autre `.aprx` ou une copie.
+2. Dans **Projet .aprx à analyser**, choisissez le fichier externe.
+3. Laissez **Diagnostic uniquement — ne créer aucune copie** pour le premier
+   passage. Choisissez un dossier de rapports local et exécutez.
+4. Lisez le HTML : chaque contrôle présente **la mesure**, **pourquoi elle est
+   importante**, **l'impact concret sur ArcGIS Pro**, **les actions numérotées**
+   et **la vérification à effectuer**. Les mêmes actions essentielles figurent
+   dans les messages de géotraitement pour les anomalies.
+5. Si le projet plante parce qu'il rouvre immédiatement une carte ou une mise
+   en page problématique, relancez avec **Copie de récupération sans vues au
+   démarrage**.
+6. Ouvrez la **nouvelle copie** créée à côté de l'original. Elle ne restaure
+   pas les anciens onglets. Dans le Catalogue, vérifiez que les cartes et mises
+   en page sont toujours présentes, puis rouvrez-les **une par une** pour
+   identifier celle qui déclenche le crash.
+7. Si l'historique est aussi très volumineux, utilisez **Copie de récupération
+   sans vues ni historique**. Conservez l'original pour retrouver les anciens
+   paramètres de géotraitement.
+
+#### Ce qui est mesuré
+
+| Contrôle | Question à laquelle il répond |
+|---|---|
+| PR-01 | Le fichier est-il une archive `.aprx` lisible ? Tous les éléments passent-ils le contrôle CRC ? Y a-t-il des doublons ou du chiffrement ? |
+| PR-02 | `GISProject.json` et les autres documents JSON sont-ils présents et valides ? Le format Pro 2.x XML est signalé sans être modifié |
+| PR-03 | Le projet, son dossier principal ou sa géodatabase par défaut sont-ils sur un partage ou dans OneDrive ? |
+| PR-04 | Les sources fichier locales existent-elles ? Les sources réseau sont identifiées mais **jamais contactées** ; les secrets des chaînes de connexion ne sont pas écrits |
+| PR-05 | Quelles cartes, scènes ou mises en page seront restaurées à l'ouverture ? Leur présence est normale et vaut `Info`, pas une fausse anomalie |
+| PR-06 | Combien d'éléments d'historique de géotraitement sont stockés et quel est leur poids approximatif ? |
+| PF-10, PF-22, PF-09, PF-01, PF-14 | Poids du projet, minuteurs de rafraîchissement, géodatabase par défaut, couches web, reprojections et charge de dessin |
+
+#### Les quatre actions proposées
+
+| Action | Effet | Quand l'utiliser |
+|---|---|---|
+| **Diagnostic uniquement** | Aucun nouveau `.aprx` ; rapports seulement | Premier passage, ou simple analyse |
+| **Reconstruire le conteneur** | Réécrit le ZIP dans une copie, sans changer le contenu des documents | Structure ZIP à reconstruire alors que tous les éléments sont lisibles ; ne répare pas un JSON invalide |
+| **Copie sans vues au démarrage** | Retire `views` et `viewLayoutXML` de la copie ; conserve cartes et mises en page | Crash répété pendant la restauration d'une vue enregistrée |
+| **Copie sans vues ni historique** | Retire aussi les éléments `GPHistory` de la copie | Même cas, avec historique de géotraitement volumineux |
+
+**Sécurité et limites :**
+
+- l'original n'est **jamais réécrit, renommé ou supprimé** ;
+- la copie est créée **à côté de l'original** pour conserver les chemins
+  relatifs, avec un nom unique : rien d'existant n'est écrasé ;
+- la source est d'abord copiée dans un instantané local temporaire. Si elle
+  change pendant la copie, l'analyse est abandonnée ;
+- la copie de récupération est rouverte et son intégrité revérifiée avant de
+  recevoir son nom final ;
+- une archive illisible, un JSON invalide ou un schéma inattendu bloque la
+  modification automatique au lieu de produire une copie prétendument réparée ;
+- cette récupération ne corrige ni un pilote graphique, ni une extension
+  tierce incompatible, ni une géodatabase endommagée, ni toutes les corruptions
+  CIM. La vérification finale consiste à ouvrir la copie dans la version cible
+  d'ArcGIS Pro et à contrôler toutes les ressources nécessaires ;
+- en cas d'erreur CRC ou de document principal invalide, privilégiez une
+  sauvegarde/version précédente et transmettez le rapport au support.
+
+Le paramètre dérivé **Projet de récupération créé** retourne le chemin de la
+nouvelle copie, ou reste vide si aucune copie n'a été produite.
+
 ### L'autotest hors ligne n'est plus dans la boîte à outils
 
 Une version précédente livrait un second outil, « Vérifier l'analyseur ». Il ne
@@ -116,8 +188,8 @@ n'est pas un contrôle réussi.
 
 ## ⚠️ À lire avant d'interpréter un résultat lancé depuis Pro
 
-Lancer le diagnostic **depuis ArcGIS Pro** signifie qu'ArcGIS Pro est ouvert.
-Ce n'est pas un détail :
+Lancer le **diagnostic de poste** depuis ArcGIS Pro signifie qu'ArcGIS Pro est
+ouvert. Ce n'est pas un détail :
 
 - **DL-12** signale Pro en cours d'exécution — c'est une trouvaille de perte de
   données à part entière, elle remonte dans la liste « act on these first ».
@@ -128,10 +200,15 @@ Ce n'est pas un détail :
   sa raison, jamais un verdict inventé.
 - **AP-01** (le correctif de cache) est **refusé** pour la même raison.
 
-Un lancement depuis Pro est donc un rapport poste **moins** les contrôles de
-fichier projet. Pour le rapport complet : fermer Pro et lancer
-`python arcgis_pro_performance_analyser.py` en ligne de commande, **dans la
-session de l'éditrice**, sans élévation.
+Un lancement du diagnostic de poste depuis Pro est donc un rapport poste
+**moins** les contrôles automatiques de fichiers récents. Pour ce rapport
+complet : fermer Pro et lancer `python arcgis_pro_performance_analyser.py` en
+ligne de commande, **dans la session de l'éditrice**, sans élévation.
+
+**Exception :** le second outil, **Analyser un projet .aprx externe**, peut
+analyser un autre fichier pendant que Pro reste ouvert. Il refuse le projet
+actif et lit un instantané du fichier sélectionné ; il ne contourne pas la
+protection avec une ouverture `ArcGISProject` du projet endommagé.
 
 Rien ici ne s'authentifie nulle part, aucun hôte n'est contacté sauf ceux que
 vous nommez, et rien ne change sur la machine tant que « Apply the gated fixes »
@@ -171,18 +248,26 @@ afficherait sinon un chiffre inventé par le moteur de rendu. `make_check` refus
 un `kpi` qui n'est pas un dictionnaire de nombres — une chaîne ou un booléen est
 refusé.
 
-### Drapeaux
+### Mode d'emploi et drapeaux
 
-Une ligne par symptôme S1 à S5, qui compte les contrôles en anomalie dont la
-ligne d'impact nomme ce symptôme, avec un lien vers chacun. Les cinq lignes sont
-toujours là, y compris à zéro : un zéro doit être visible, pas absent. Rien n'est
-déduit — un contrôle dont l'impact ne nomme aucun symptôme n'en drape aucun.
+Une section **Comment lire et corriger** rappelle l'ordre : lire la mesure,
+comprendre l'impact, agir une étape à la fois, puis vérifier sur le même
+scénario.
+
+Une ligne par symptôme S1 à S6 — dont **crash pendant l'ouverture du projet** —
+compte les contrôles en anomalie dont la ligne d'impact nomme ce symptôme, avec
+un lien vers chacun. Les six lignes sont toujours là, y compris à zéro : un zéro
+doit être visible, pas absent. Rien n'est déduit — un contrôle dont l'impact ne
+nomme aucun symptôme n'en drape aucun.
 
 ### Chaque contrôle
 
 Une carte avec : le badge de statut, le marqueur « perte de données », le
-**problème détecté**, l'**impact**, et la **correction / optimisation** juste à
-côté. La valeur attendue, la preuve et le correctif manuel sont repliés. Les
+**problème détecté avec les valeurs mesurées**, **pourquoi le résultat est
+important**, l'**impact concret sur ArcGIS Pro**, les **actions à prendre dans
+l'ordre** et la **vérification après correction**. Pour `Info` ou `Non mesuré`,
+les actions expliquent comment obtenir la mesure au lieu d'inventer une panne.
+La valeur attendue, la preuve et les détails techniques sont repliés. Les
 nombres mesurés apparaissent en pastilles, pour vérifier la jauge contre la
 mesure.
 
@@ -265,15 +350,17 @@ rapport le dit.
 ## Vérifier
 
 ```
-python tests/test_toolbox.py      # 92 assertions : rendu, interface et .pyt généré
+python tests/test_toolbox.py      # 129 assertions : rendu, deux outils et récupération .aprx
 python arcgis_pro_performance_analyser.py --self-test   # 751 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 
 `tests/test_toolbox.py` n'a besoin que de la bibliothèque standard : il exécute
 le `.pyt` contre un module `arcpy` de substitution, donc ce sont bien
-`getParameterInfo`, `updateMessages` et `execute` de la toolbox qui tournent,
-jusqu'à l'écriture réelle des trois fichiers.
+`getParameterInfo`, `updateMessages` et `execute` des deux outils qui tournent.
+Il crée aussi de vrais `.aprx` temporaires, vérifie les CRC, compare l'original
+octet par octet et contrôle que les copies sans vues/historique conservent les
+définitions des cartes et mises en page.
 
 Un détail que ce test épingle : le `.pyt` embarque **sa propre copie** du moteur.
 Remplacer `run()` dans le module importé séparément ne change donc rien à ce que
