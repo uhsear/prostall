@@ -2,8 +2,8 @@
 
 Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did
 not produce. Read-only by default: nothing changes, and no host is contacted unless you name it.
-Two flags write: `--report` creates two new files in a folder you name, and `--apply` runs two
-gated fixes. The one read that crosses the network unasked is a project folder that already lives
+Two flags write: `--report` creates report files in a folder you name, and `--apply` runs one
+gated, reversible cache fix with ArcGIS Pro closed. The one read that crosses the network unasked is a project folder that already lives
 on a share, as Pro does when it opens the project.
 
 An editor tells you Pro takes five minutes to open, that it hangs for two or three minutes in the
@@ -141,7 +141,7 @@ PASS  and every per-user fix is refused under that profile, even with --apply, r
 PASS  nothing is promoted to the act-first list off an unread machine  <-- pinned defect
 PASS  exactly three checks can still answer on a machine that reads back nothing: who is running the tool, whether Pro is open, and a graphics preference whose absence IS the finding. Every other check reports Info or Skipped rather than a verdict  <-- pinned defect
 PASS  the cache folder is renamed aside, never deleted  <-- pinned defect
-PASS  when there was a previous value, the undo restores that value rather than deleting the setting  <-- pinned defect
+PASS  an existing graphics preference survives --apply byte for byte: the retired AP-02 cannot turn a driver issue into a startup crash
 ...
 ----------------------------------------------------------------------
 the command line: nothing dangerous is on by default
@@ -193,7 +193,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-629 assertions, 0 failed
+770 assertions, 0 failed
 ```
 
 ## Requirements
@@ -220,11 +220,11 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The same 751 assertions pass on Windows (Python 3.13) and on Linux (Python 3.12), with identical
-labels. That matters more than it sounds: the path logic answers questions about Windows paths,
-and two of the bugs it pins are cases where the standard library answers for the host instead of
-for the path. The reads that only exist on Windows are run twice, once with the platform switched
-off, so each host walks the branch the other one takes and the count stays equal.
+The suite contains 770 assertions with platform-neutral labels. That matters more than it sounds:
+the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
+the standard library answers for the host instead of for the path. The reads that only exist on
+Windows are also exercised with the platform switched off, so Linux and Windows can cover each
+other's fallback branches. Run the suite on the target Windows host as well as in CI before release.
 
 On Windows the tool starts four programs that ship with Windows, all read-only: `powershell.exe`
 for `Get-MpPreference`, `Get-NetAdapter`, `Get-NetAdapterPowerManagement` and
@@ -253,7 +253,18 @@ report, from the editor's own session, and says which of them it could not read.
 
 ## Quick start
 
-Run it in the editor's own session, without elevation, while Pro is closed.
+On Windows, keep `Diagnostiquer_ArcGIS_Pro.bat`,
+`arcgis_pro_performance_analyser.py` and `html_report.py` together and
+**double-click the `.bat`**. It needs no open ArcGIS Pro session, asks no
+question, runs the read-only workstation diagnostic and opens the resulting
+HTML report. TXT and JSON are written beside the HTML. The default folder is
+`%LOCALAPPDATA%\\ArcGISPro_PerformanceAnalyser\\Rapports`; pass another local
+folder as the batch file's first argument if needed. The console shows report
+and launcher failures and stays open until you read them. The launcher never
+passes `--apply`, never repairs a project and never starts `ArcGISPro.exe`.
+
+For a scripted run, use the editor's own session, without elevation, while Pro
+is closed:
 
 ```
 python arcgis_pro_performance_analyser.py
@@ -266,7 +277,8 @@ host is contacted, apart from reading a recent project folder that already sits 
 python arcgis_pro_performance_analyser.py --sde-server gisdb01 --portal gis.example.org --report C:\Temp\properf
 ```
 
-That adds two bounded TCP probes and writes the report as text and as JSON.
+That adds two bounded TCP probes and writes the report as text and as JSON. Add `--html` to
+write the self-contained HTML report in the same run.
 
 To analyse **one explicitly selected project**, including while another project is open in Pro:
 
@@ -292,13 +304,14 @@ This writes `Broken_recuperation_sans_vues.aprx` beside the original. It removes
 | `--verbose` | off | Print the expected text and the evidence lines as well. |
 | `--json` | off | Print the report as JSON on stdout instead of the console form. Stdout is that one document and nothing else, also with `--report`. |
 | `--report DIR` | none | Write the text and JSON reports into this directory, creating it. Without it, only an explicit `--apply` or `--project-repair` can write anything. |
+| `--html` | off | With `--report`, also write the self-contained HTML report. Keep `html_report.py` beside the engine; the `.bat` does this automatically. `--html` without `--report` is exit 64. |
 | `--sde-server HOST` | none | TCP-probe this geodatabase host. Connect only, no credential. Without it the probe is skipped. A URL, a path or a space in the value is refused with exit 64. |
 | `--sde-port PORT` | `1433` | Port for that probe. |
 | `--portal HOST` | none | TCP-probe this portal host on 443. Without it the probe is skipped. Refused like `--sde-server`. |
 | `--timeout MS` | `4000` | Bound on each network probe. |
 | `--project APRX` | none | Run the eleven-check selected-project analysis instead of the workstation analysis. Uses a snapshot; safe to use while another project is open. |
 | `--project-repair MODE` | `none` | With `--project`: `repack`, `views`, or `views_history`. Writes a verified new copy beside the source, never overwrites the source. `--apply` cannot be combined with this mode. |
-| `--apply` | off | Run the gated workstation fixes. Each is refused unless its check actually failed, prints its own undo, and never deletes anything. |
+| `--apply` | off | Run the gated cache fix. It is refused unless its check actually failed and Pro is closed, prints its own undo, and never deletes anything. It never changes the GPU preference. |
 
 Every parser error is exit 64, including a refused abbreviation such as `--ap`. No abbreviation is
 accepted, so a prefix of `--apply` cannot arm the fix path.
@@ -309,7 +322,7 @@ credential.
 
 ## What it checks
 
-Thirty-nine checks. The thirteen that bear on lost edits run first and print first, because
+Forty checks. The thirteen that bear on lost edits run first and print first, because
 silent edit loss outranks every performance finding.
 
 **Data loss**, in the order they run and print.
@@ -327,7 +340,7 @@ silent edit loss outranks every performance finding.
 | DL-10 | A bounded TCP connect to the geodatabase host, with its latency. A name that does not resolve is `Info`, not `Fail`: nothing reached the server. |
 | DL-11 | Connection files on the box, by path, including the copies cached under the search index. |
 | DL-12 | Whether Pro is running right now, which blocks the cache fix and the project-file read. A process list that could not be read is `Info`, and blocks both too. |
-| DL-13 | The event timeline for the last 14 days: Pro crashes and hangs, dirty shutdowns, and SMB client connectivity warnings. SMB events alone are `Info`; a Pro crash, a Pro hang or a dirty shutdown makes it `Warn`. |
+| DL-13 | The event timeline for the last 14 days: Pro crashes and hangs, dirty shutdowns, and SMB client connectivity warnings. Application Error 1000 includes the faulting module when Windows supplies it. SMB events alone are `Info`; a Pro crash, a Pro hang or a dirty shutdown makes it `Warn`. |
 | PF-07 | Leftover session folders, and which of them still hold a project file or a scratch table with rows in it. |
 
 **Performance**
@@ -338,6 +351,7 @@ silent edit loss outranks every performance finding.
 | PF-02 | The SMB client settings, with multichannel graded only when a recent project is on a share. |
 | PF-03 | How long one listing takes in each of the first two share folders that hold a recent project. The report says how many further folders were not timed. One folder that cannot be listed makes it `Info`. |
 | PF-04 | The installed release and build. |
+| PF-31 | Startup add-ins, configurations and plug-ins: redirected/default and HKCU/HKLM well-known folders, DAML identity/version/target, `autoLoad`, corrupt packages, missing or bundled Esri assemblies, and correlation with Application Error fault modules. Static ZIP/XML reads only; no package code is loaded. |
 | PF-05 | The display settings, read only. A `user.config` nobody could read is `Info`, not a list of `<absent>`. |
 | PF-06 | The local cache: size, and how much of it is orphaned. |
 | PF-08 | The catalog search index, and whether it indexes network connections. |
@@ -357,6 +371,9 @@ silent edit loss outranks every performance finding.
 | PF-22 | Layer refresh timers and the default geodatabase, read from inside the three newest recent `.aprx` files, only while DL-12 shows Pro closed. The report says how many older ones were not read. |
 | PF-26 | Whether a roaming profile carries the ESRI settings folder. |
 | PF-27 | Symbology that does not refresh after a field calculation. |
+| PF-28 | CPU/core capacity and single-core performance evidence. |
+| PF-29 | GPU model, driver evidence and software-rendering/WARP risk. |
+| PF-30 | Dataset storage, oversized shapefiles and network or synchronised storage risks. |
 
 PF-01, PF-09, PF-10, PF-14 and PF-22 all read the project file, and they share **one** read. Each
 read holds the file open, and doing it five times would be five chances to contend with a save -
@@ -428,6 +445,19 @@ restoring a backup or contacting Esri is the safe action.
   classified, because Pro stores `.` for a home folder that is the project folder. A project read
   only in part, because a size or count cap was reached, is `Info`, never `Pass`.
 
+- **PF-31, startup packages.** Discovery follows the default and redirected Documents locations,
+  HKCU/HKLM well-known folders and registered configurations, then versioned
+  `3.x` plug-ins. `.esriAddinX`, `.proConfigX` and `.esriPlugin` archives are
+  read as ZIP directories and bounded XML, never loaded or extracted. The report
+  inventories identity, publisher, add-in version, `desktopVersion`,
+  `autoLoad`, assemblies and archive integrity. A newer target, a major-version
+  mismatch, a missing `defaultAssembly`, a bundled Esri API assembly or a
+  corrupt package is a concrete finding. If Application Error 1000 names a DLL
+  that is present in a package, PF-31 reports the match as supporting evidence,
+  not proof. Digital signatures are not verified, bounded reads can be
+  incomplete, and no static inventory can enumerate every possible Pro crash
+  cause. Unreadable locations make coverage incomplete rather than claiming
+  that no add-in exists.
 - **DL-10, PF-19 and DL-12, a name or a list nobody could read.** A host name that does not resolve
   is `Info` and unmeasured. It is not `Fail`, because nothing reached the server, and it does not
   reach the act-first list. A refused or timed-out connect to a name that did resolve still fails.
@@ -479,13 +509,11 @@ determined. A finding outranks code 3.
 
 ## The fixes
 
-`--apply` runs two fixes, and only two. Both are per-user, both are gated, and both print the
-command that undoes them.
+`--apply` runs one fix, and only one. It is per-user, gated, and prints the command that undoes it.
 
 | Id | Acts on | What it does |
 |---|---|---|
 | AP-01 | PF-06 | Renames the local cache folder aside so Pro rebuilds it. Refused while Pro is running. |
-| AP-02 | PF-11 | Writes the high-performance graphics preference for ArcGIS Pro. |
 
 Four gates, in order: the check must exist, it must not be `Skipped`, it must be in `Warn` or
 `Fail` (an `Info` check is refused as not determined, never called healthy), and a per-user fix is
@@ -497,16 +525,29 @@ report success while changing nothing for the editor.
 AP-01 renames. It does not delete. A diagnostic that deletes a folder is how the last copy of
 something disappears, and the undo is a single `move` back.
 
+**AP-02 is retired.** Older versions could force `ArcGISPro.exe` onto the high-performance GPU.
+That is not a safe automatic repair: an unstable driver can make Pro crash at the splash screen,
+before any project opens. PF-11 still reports the preference and gives reviewed manual guidance,
+but neither `--apply` nor the Python toolbox changes it. If Pro started crashing after an older
+AP-02 run, open that run's JSON report, find the `applied` record whose `id` is `AP-02`, and run its
+exact `undo` command. The same run's TXT report prints that command after `undo   :` without JSON
+escaping, so it is the easiest version to copy. This restores the recorded previous value instead
+of guessing whether the registry value should be deleted or changed. As a separate, non-mutating isolation test, Esri
+supports launching `"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe" /disableaddins`.
+
 Nothing else is automated in the workstation run, on purpose. OneDrive redirection, the project
-location, the power plan, Defender, the adapter power setting, the SMB client, dump collection and
-anything inside a geodatabase are reported and never touched. Those are policy decisions or
-reviewed operator actions. The selected-project recovery described above is a separate mode: it
-can write a new `.aprx` copy, but never changes the selected source or any geodatabase.
+location, the power plan, Defender, the adapter power setting, the GPU preference, the SMB client,
+dump collection and anything inside a geodatabase are reported and never touched. Those are policy
+decisions or reviewed operator actions. The selected-project recovery described above is a
+separate mode: it can write a new `.aprx` copy, but never changes the selected source or any
+geodatabase. The in-Pro workstation tool is read-only even if a legacy model forces its old
+`apply_fixes` parameter on.
 
 ## Output
 
 The console report lists the data-loss block, then the performance block, then a tally, then the
-findings to act on first. `--report` writes the same thing as text, plus a JSON document beside it:
+findings to act on first. `--report` writes the same thing as text, plus a JSON document beside it;
+`--html` adds a self-contained HTML rendering of that same document:
 
 ```json
 {
@@ -518,8 +559,7 @@ findings to act on first. `--report` writes the same thing as text, plus a JSON 
  "fixable": ["PF-06"],
  "counts": {"Fail": 2, "Warn": 3, "Pass": 7, "Info": 8, "Skipped": 2},
  "applied": [],
- "notes": ["would apply [AP-01] Rename the ESRI local cache folder aside so Pro rebuilds it.",
-           "skip [AP-02] PF-11 is already healthy (Pass)"],
+ "notes": ["would apply [AP-01] Rename the ESRI local cache folder aside so Pro rebuilds it."],
  "checks": [{"id": "DL-06", "category": "Storage", "status": "Fail", "dataloss": true,
              "title": "Documents redirected into OneDrive (Known Folder Move)",
              "observed": "...", "expected": "...", "impact": "...", "fix": "...",
@@ -528,8 +568,8 @@ findings to act on first. `--report` writes the same thing as text, plus a JSON 
 }
 ```
 
-With `--json` and `--report` together, stdout stays one JSON document and the three `report :`
-lines go to stderr.
+With `--json` and `--report` together, stdout stays one JSON document and the `report :`
+lines go to stderr: two paths normally, three with `--html`.
 
 Diff that JSON against a workstation that is known to be fast. That is the fastest way to find what
 is different about this one, and it is why every timestamp in the report is UTC: two machines in
@@ -549,12 +589,13 @@ missing on the machine it lands on.
 
 | File | What it is |
 |---|---|
+| `Diagnostiquer_ArcGIS_Pro.bat` | Read-only Windows launcher for TXT, JSON and HTML without opening ArcGIS Pro; keep the engine and renderer beside it |
 | `ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt` | **The shipped artefact.** Two tools, with the engine and the renderer inlined |
 | `arcgis_pro_performance_analyser.py` | The diagnostic engine and CLI. A single file, no `arcpy` import |
 | `html_report.py` | The HTML renderer. A pure function over the report document, no `arcpy` |
 | `toolbox_glue.py` | The ArcGIS Pro glue. The only part that imports `arcpy` |
 | `build_toolbox.py` | Assembles those three into the one `.pyt` |
-| `tests/test_toolbox.py` | 129 assertions over the renderer, both tools and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
+| `tests/test_toolbox.py` | 135 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
 
 Install by copying that one `.pyt` anywhere stable, then Catalog pane > Toolboxes > Add Toolbox,
 pointing at it. The tool appears under "ArcGIS Pro Performance Analyser".
@@ -611,8 +652,8 @@ Pro and run `arcgis_pro_performance_analyser.py` in the editor's own session. Th
 while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
-python tests/test_toolbox.py      # 129 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 751 assertions over the diagnostic
+python tests/test_toolbox.py      # 135 assertions over the renderer, both tools and project recovery
+python arcgis_pro_performance_analyser.py --self-test   # 770 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 
@@ -767,6 +808,14 @@ Every Windows, Esri and Defender behaviour the newer checks rely on, and where i
   answers `DRIVE_REMOTE` (4) for a remote (network) drive.
 - The Diagnostic Monitor shortcut and its six tabs:
   [ArcGIS Diagnostic Monitor](https://doc.esri.com/en/arcgis-pro/latest/get-started/arcgis-diagnostic-monitor.html).
+- Add-in well-known folders, administrative folders and `/disableaddins` recovery:
+  [Manage add-ins](https://pro.arcgis.com/en/pro-app/latest/get-started/manage-add-ins.htm)
+  and [ArcGIS Pro crashes on launch after installing an add-in](https://support.esri.com/en-us/knowledge-base/arcgis-pro-crashes-on-launch-after-installing-add-in-000036367).
+  Registry locations, configurations, plug-ins and loading order:
+  [Advanced Topics](https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/conceptdocs/docs/ProConcepts-Advanced-Topics.html)
+  and [Configurations](https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/conceptdocs/docs/ProConcepts-Configurations.html).
+  DAML `desktopVersion`, `defaultAssembly` and add-in failure evidence:
+  [Diagnosing ArcGIS Pro Add-ins](https://pro.arcgis.com/en/pro-app/3.6/sdk/api-reference/conceptdocs/docs/ProGuide-Diagnosing-ArcGIS-Pro-Add-ins.html).
 - Multichannel on by default:
   [Manage SMB Multichannel](https://learn.microsoft.com/en-us/windows-server/storage/storage-spaces/manage-smb-multichannel).
   The settings read: [Set-SmbClientConfiguration](https://learn.microsoft.com/en-us/powershell/module/smbshare/set-smbclientconfiguration).

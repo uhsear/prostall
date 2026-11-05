@@ -118,9 +118,11 @@ tool is the exception: it can analyse another .aprx while Pro stays open,
 because it snapshots that file and never opens it as the active project.
 
 Nothing here signs in to anything and no host is contacted unless you name one.
-Workstation changes require "Apply the gated fixes"; project recovery requires
-its own explicit mode and writes only a new copy. Every change reports how to
-go back, and no original project or source data is deleted.
+The in-Pro workstation tool is always read-only. AP-01 belongs to the separate
+command-line run with Pro closed; the former AP-02 GPU preference change was
+retired because forcing an adapter can cause a startup crash. Project recovery
+requires its own explicit mode and writes only a new copy. No original project
+or source data is deleted.
 
 Provenance
 ----------

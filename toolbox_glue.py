@@ -37,8 +37,10 @@ prompt in the editor's own session. The toolbox exists for the run you can do
 without leaving the application, and it says so on the page.
 
 Nothing here signs in to anything and no host is contacted unless you name one.
-Machine state changes only through the explicit workstation-fix switch or an
-explicit selected-project recovery mode; the latter writes a new copy only.
+The in-Pro workstation tool never changes machine state: AP-01 belongs to the
+command-line run with Pro closed, and the former AP-02 GPU change is retired.
+Only an explicit selected-project recovery mode can write here, and it writes
+a new copy only.
 """
 
 import os
@@ -383,41 +385,37 @@ class Diagnose(object):
                "l'ouverture échoue.</p>")
 
         apply_fixes = arcpy.Parameter(
-            displayName="Appliquer les correctifs (renomme le cache, épingle "
-                        "le choix de carte graphique)",
+            displayName="Correctifs du poste (indisponibles dans ArcGIS Pro)",
             name="apply_fixes",
             datatype="GPBoolean",
             parameterType="Optional",
             direction="Input")
         apply_fixes.value = False
-        apply_fixes.category = "Modifie la machine"
+        # Keep the parameter for compatibility with existing models, but never
+        # let this in-Pro entry point mutate the application that hosts it.
+        apply_fixes.enabled = False
+        apply_fixes.category = "Lecture seule dans ArcGIS Pro"
         hinted(apply_fixes,
-               "SEUL paramètre qui modifie la machine. Décoché, l'outil est en "
-               "lecture seule.",
-               "<p><b>À quoi ça sert</b> : c'est l'interrupteur entre « lire » "
-               "et « réparer ». Tant qu'il est décoché, l'outil ne fait que "
-               "lire la machine et n'y change rien.</p>"
-               "<p><b>Défaut</b> : <b>décoché</b>.</p>"
-               "<p>Cochez-le et <b>deux correctifs seulement</b> s'appliquent, "
-               "chacun uniquement si son propre contrôle l'a justifié :</p>"
-               "<ul>"
-               "<li><b>AP-01</b> renomme le dossier de cache ESRI en lui "
-               "ajoutant un suffixe <code>.properf-&lt;date&gt;</code>. "
-               "<b>Rien n'est supprimé</b> : l'ancien dossier reste sur le "
-               "disque et Pro en reconstruit un neuf. Refusé depuis Pro, parce "
-               "que Pro tient ce dossier.</li>"
-               "<li><b>AP-02</b> épingle ArcGIS Pro sur la carte graphique "
-               "hautes performances, en écrivant la préférence pour "
-               "<code>ArcGISPro.exe</code> dans <code>HKCU</code> uniquement "
-               "— jamais dans la ruche machine, donc sans droit "
-               "administrateur.</li>"
-               "</ul>"
-               "<p><b>Chaque correctif appliqué affiche sa propre commande "
-               "d'annulation</b>, dans les messages et dans le rapport. "
-               "Copiez-la avant de fermer la fenêtre.</p>"
-               "<p><b>Exemple</b> : faites d'abord un passage <b>décoché</b>, "
-               "lisez le rapport, puis relancez coché seulement si AP-01 ou "
-               "AP-02 y figure comme proposé.</p>")
+               "Désactivé : le diagnostic dans ArcGIS Pro ne modifie jamais le "
+               "poste. Le correctif de cache se lance hors de Pro.",
+               "<p><b>À quoi ça sert</b> : ce paramètre historique est "
+               "conservé pour les modèles existants, mais il est "
+               "<b>désactivé</b>. Le diagnostic exécuté dans ArcGIS Pro est "
+               "toujours en lecture seule.</p>"
+               "<p><b>Défaut</b> : <b>décoché et désactivé</b>.</p>"
+               "<p><b>AP-01</b>, seul correctif de poste encore automatisé, "
+               "renomme le cache sans le supprimer et affiche sa commande "
+               "d'annulation. Il doit être lancé avec le script Python, "
+               "<b>ArcGIS Pro fermé</b>.</p>"
+               "<p><b>AP-02 est retiré</b> : forcer le GPU hautes performances "
+               "peut provoquer un crash au splash screen si son pilote est "
+               "instable. Si un ancien passage a appliqué AP-02, utilisez la "
+               "commande <code>undo</code> enregistrée dans son rapport JSON "
+               "pour restaurer exactement la valeur précédente.</p>"
+               "<p><b>Exemple</b> : laissez ce paramètre désactivé ici. Pour "
+               "un cache à reconstruire, fermez Pro et utilisez "
+               "<code>python arcgis_pro_performance_analyser.py --apply</code> "
+               "après avoir lu le diagnostic.</p>")
 
         html_out = arcpy.Parameter(
             displayName="Rapport HTML",
@@ -465,12 +463,12 @@ class Diagnose(object):
                     parameters[index].setErrorMessage(
                         "%r is not a host name: %s" % (host, problem))
         if parameters[8].value:
-            parameters[8].setWarningMessage(
-                "You are running this from inside ArcGIS Pro, so DL-12 reports "
-                "Pro as running and the cache fix (AP-01) is refused. Only the "
-                "GPU preference (AP-02) can apply. Both print their own undo "
-                "command, and neither deletes anything. Run arcgis_pro_performance_analyser.py from a "
-                "command prompt with Pro closed for the full set of fixes.")
+            parameters[8].setErrorMessage(
+                "Workstation fixes cannot run inside ArcGIS Pro. AP-01 must "
+                "run from a command prompt with Pro closed. The former AP-02 "
+                "GPU fix was retired because forcing an adapter can cause a "
+                "startup crash; use an older report's exact undo command if "
+                "that change needs to be reversed.")
         return
 
     def execute(self, parameters, messages):
@@ -481,7 +479,9 @@ class Diagnose(object):
             "sde_port": int(parameters[2].value or 1433),
             "portal": parameters[3].valueAsText or None,
             "timeout": int(parameters[4].value or 4000),
-            "apply": bool(parameters[8].value),
+            # Defence in depth: even a caller bypassing the disabled parameter
+            # and its validation cannot mutate the running Pro workstation.
+            "apply": False,
         }
         verbose = bool(parameters[5].value)
 
