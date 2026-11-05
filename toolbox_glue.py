@@ -10,9 +10,14 @@ on a machine with no ArcGIS at all.
 
 The two tools appear under "ArcGIS Pro Performance Analyser".
 
-Run "Diagnose ArcGIS Pro slowness" from the Geoprocessing pane. It writes
+Run "Diagnostiquer la lenteur d'ArcGIS Pro" for the workstation. It writes
 arcgis_pro_performance_analyser_<stamp>.html, .json and .txt into the output
 folder and opens the HTML in the default browser.
+
+Run "Analyser un projet .aprx externe" for an explicitly selected, non-active
+project. That reader snapshots the file, performs bounded ZIP/JSON/source
+checks and can write a verified recovery COPY beside the source. The original
+is never rewritten, and the recovery choice is diagnostic-only by default.
 
 Read this before you trust the numbers
 --------------------------------------
@@ -31,8 +36,9 @@ checks. For the complete report, close Pro and run arcgis_pro_performance_analys
 prompt in the editor's own session. The toolbox exists for the run you can do
 without leaving the application, and it says so on the page.
 
-Nothing here signs in to anything, no host is contacted unless you name one,
-and no machine state changes unless you tick "Apply the gated fixes".
+Nothing here signs in to anything and no host is contacted unless you name one.
+Machine state changes only through the explicit workstation-fix switch or an
+explicit selected-project recovery mode; the latter writes a new copy only.
 """
 
 import os
@@ -80,6 +86,69 @@ def _tail(text, lines=40):
     return kept[-lines:]
 
 
+def _current_project_path():
+    """The active project's path, or None when Pro has none/cannot answer."""
+    try:
+        project = arcpy.mp.ArcGISProject("CURRENT")
+        return project.filePath or None
+    except Exception:
+        return None
+
+
+def _same_path(left, right):
+    if not left or not right:
+        return False
+    return os.path.normcase(os.path.abspath(left)) == \
+        os.path.normcase(os.path.abspath(right))
+
+
+def _safe_stem(path):
+    """A readable report filename without path punctuation."""
+    stem = os.path.splitext(os.path.basename(path or "projet"))[0]
+    cleaned = "".join(c if c.isalnum() or c in ("-", "_") else "_"
+                      for c in stem)
+    return cleaned.strip("_")[:80] or "projet"
+
+
+def _emit_findings(document, messages):
+    """Put the explanation and ordered actions in the Pro messages as well."""
+    for check in document.get("checks") or []:
+        if check.get("status") not in ("Fail", "Warn"):
+            continue
+        messages.addWarningMessage(
+            "[%s] %s — %s" % (check.get("id"),
+                              "ANOMALIE" if check.get("status") == "Fail"
+                              else "AVERTISSEMENT", check.get("title")))
+        evidence = [line for line in (check.get("observed") or "").splitlines()
+                    if line.strip()]
+        for line in evidence[:3]:
+            messages.addMessage("  Mesure : %s" % line)
+        if len(evidence) > 3:
+            messages.addMessage("  … %d autre(s) ligne(s) de mesure dans le "
+                                "rapport." % (len(evidence) - 3))
+        if check.get("explanation"):
+            messages.addMessage("  Pourquoi : %s" % check["explanation"])
+        if check.get("impact_fr") or check.get("impact"):
+            messages.addMessage("  Impact ArcGIS Pro : %s"
+                                % (check.get("impact_fr") or check.get("impact")))
+        for number, step in enumerate(check.get("steps") or [], 1):
+            messages.addMessage("  Étape %d : %s" % (number, step))
+        if check.get("verification"):
+            messages.addMessage("  Vérification : %s" % check["verification"])
+
+
+RECOVERY_NONE = "Diagnostic uniquement — ne créer aucune copie"
+RECOVERY_REPACK = "Reconstruire le conteneur — contenu interne inchangé"
+RECOVERY_VIEWS = "Copie de récupération sans vues au démarrage"
+RECOVERY_VIEWS_HISTORY = "Copie de récupération sans vues ni historique"
+RECOVERY_MODES = {
+    RECOVERY_NONE: "none",
+    RECOVERY_REPACK: "repack",
+    RECOVERY_VIEWS: "views",
+    RECOVERY_VIEWS_HISTORY: "views_history",
+}
+
+
 class Toolbox(object):
     def __init__(self):
         self.label = "ArcGIS Pro Performance Analyser"
@@ -90,7 +159,7 @@ class Toolbox(object):
             "produite. Rend un rapport HTML, contrôle par contrôle : ce qui "
             "a été mesuré, ce que cela coûte à ArcGIS Pro, et quoi faire. "
             "Lecture seule tant que les correctifs ne sont pas cochés.")
-        self.tools = [Diagnose]
+        self.tools = [Diagnose, AnalyzeProject]
         self.canRunInBackground = False
 
 
@@ -100,12 +169,12 @@ class Diagnose(object):
     def __init__(self):
         self.label = "Diagnostiquer la lenteur d'ArcGIS Pro"
         self.description = (
-            "L'OUTIL À LANCER. Lit ce poste — registre, stockage, "
+            "DIAGNOSTIC DU POSTE. Lit ce poste — registre, stockage, "
             "redirection OneDrive, réseau, processeur, carte graphique, "
             "cache, journal d'événements — et rend un rapport HTML qui dit, "
             "contrôle par contrôle, ce qui a été mesuré, ce que cela coûte à "
-            "ArcGIS Pro et comment le corriger. Trente-huit contrôles, dont "
-            "treize portent sur des modifications qui peuvent se perdre, et "
+            "ArcGIS Pro et comment le corriger. Les contrôles portent notamment "
+            "sur les modifications qui peuvent se perdre, et "
             "un qui relève dans le journal d'événements les plantages, les "
             "suspensions et les fermetures sans arrêt propre. Lecture seule, "
             "sauf si vous cochez explicitement les correctifs. Écrit un HTML, "
@@ -476,6 +545,7 @@ class Diagnose(object):
         for status, count in engine.counts(document["checks"]):
             if count:
                 messages.addMessage("  %-8s %d" % (status.upper(), count))
+        _emit_findings(document, messages)
         if document["act_first"]:
             messages.addWarningMessage(
                 "ACT ON THESE FIRST - they bear on the vanished edits: %s"
@@ -506,5 +576,294 @@ class Diagnose(object):
             "The report carries the account name, local paths, connection file "
             "names and exclusion paths. Read it before you send it to anyone.")
         messages.addMessage("Analyser exit code %d: %s"
+                            % (code, report.EXIT_MEANING.get(code, "?")))
+        return
+
+
+class AnalyzeProject(object):
+    """Read one explicitly selected, non-active .aprx and optionally recover a copy."""
+
+    def __init__(self):
+        self.label = "Analyser un projet .aprx externe"
+        self.description = (
+            "Sélectionnez un fichier .aprx autre que le projet actuellement "
+            "ouvert. L'outil en fait une copie instantanée temporaire, vérifie "
+            "le conteneur ZIP, les documents JSON, les vues restaurées, "
+            "l'historique, les sources et la charge des cartes. Le rapport "
+            "explique chaque problème, son impact dans ArcGIS Pro et les "
+            "étapes de correction. En option, il crée une copie de récupération "
+            "sans vues au démarrage et/ou sans historique. L'original n'est "
+            "jamais modifié.")
+        self.canRunInBackground = False
+        self.category = "Diagnostic"
+
+    def getParameterInfo(self):
+        def hinted(param, tooltip, long_help):
+            param.helpMessage = tooltip
+            param.parameterHelp = long_help
+            return param
+
+        project = arcpy.Parameter(
+            displayName="Projet .aprx à analyser (pas le projet ouvert)",
+            name="project",
+            datatype="DEFile",
+            parameterType="Required",
+            direction="Input")
+        project.filter.list = ["aprx"]
+        hinted(project,
+               "Sélectionnez un .aprx différent de celui qui est ouvert dans "
+               "cette session ArcGIS Pro.",
+               "<p><b>À quoi ça sert</b> : choisir précisément le projet à "
+               "diagnostiquer, au lieu d'analyser les projets récents ou le "
+               "projet actif.</p><p><b>Obligatoire</b> : un fichier "
+               "<code>.aprx</code>. Le projet actuellement ouvert est refusé, "
+               "même si vous demandez seulement un diagnostic.</p>"
+               "<p>L'outil travaille sur une <b>copie instantanée temporaire"
+               "</b>. Si le fichier change pendant cette copie, l'analyse est "
+               "abandonnée pour ne pas mélanger deux enregistrements.</p>"
+               "<p><b>Exemple</b> : <code>C:\\GIS\\Anciens\\Parcelles.aprx</code>."
+               " Vous pouvez laisser un autre projet ouvert dans Pro.</p>")
+
+        out = arcpy.Parameter(
+            displayName="Dossier des rapports",
+            name="output_folder",
+            datatype="DEFolder",
+            parameterType="Optional",
+            direction="Input")
+        out.value = os.path.join(
+            arcpy.env.scratchFolder or os.environ.get("TEMP") or ".",
+            "ArcGISPro_PerformanceAnalyser")
+        hinted(out,
+               "Dossier local où écrire le HTML, le JSON et le TXT.",
+               "<p><b>À quoi ça sert</b> : recevoir les trois rapports. Ce "
+               "dossier ne reçoit <b>pas</b> la copie de récupération du "
+               "projet.</p><p><b>Défaut</b> : <code>&lt;scratch&gt;\\ArcGISPro_"
+               "PerformanceAnalyser</code>.</p><p>La copie .aprx est écrite "
+               "<b>à côté de l'original</b> pour préserver les chemins relatifs "
+               "des données. Son nom reçoit un suffixe explicite et un fichier "
+               "existant n'est jamais écrasé.</p>")
+
+        repair = arcpy.Parameter(
+            displayName="Action de récupération sur une copie",
+            name="repair_mode",
+            datatype="GPString",
+            parameterType="Optional",
+            direction="Input")
+        repair.value = RECOVERY_NONE
+        repair.filter.type = "ValueList"
+        repair.filter.list = [RECOVERY_NONE, RECOVERY_REPACK, RECOVERY_VIEWS,
+                              RECOVERY_VIEWS_HISTORY]
+        repair.category = "Récupération — jamais sur l'original"
+        hinted(repair,
+               "Diagnostic seul par défaut. Les autres choix créent un nouveau "
+               ".aprx à côté de l'original.",
+               "<p><b>À quoi ça sert</b> : tenter une récupération ciblée "
+               "<b>sans jamais réécrire le projet d'origine</b>.</p>"
+               "<ul><li><b>Diagnostic uniquement</b> (défaut) : aucun nouveau "
+               "projet.</li><li><b>Reconstruire le conteneur</b> : réécrit le "
+               "ZIP sans changer les documents ; utile seulement si tous les "
+               "éléments sont lisibles.</li><li><b>Sans vues au démarrage</b> : "
+               "retire <code>views</code> et <code>viewLayoutXML</code> de la "
+               "copie pour ne pas rouvrir une carte ou mise en page qui fait "
+               "planter Pro. Les définitions des cartes et mises en page sont "
+               "conservées.</li><li><b>Sans vues ni historique</b> : retire "
+               "aussi les éléments <code>GPHistory</code> de la copie.</li></ul>"
+               "<p><b>Garanties</b> : intégrité revérifiée avant de nommer la "
+               "copie, aucun écrasement, original intact. La récupération est "
+               "refusée si les contrôles nécessaires ne sont pas Conforme. "
+               "Elle ne garantit pas de réparer toutes les corruptions.</p>")
+
+        verbose = arcpy.Parameter(
+            displayName="Inclure les preuves détaillées",
+            name="verbose",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        verbose.value = False
+        hinted(verbose,
+               "Ajoute les valeurs attendues et preuves techniques au TXT.",
+               "<p><b>À quoi ça sert</b> : conserver les détails nécessaires "
+               "à un ticket de support.</p><p><b>Défaut</b> : décoché. Les "
+               "explications, impacts et étapes restent affichés dans tous "
+               "les cas.</p><p><b>Exemple</b> : cochez avant d'envoyer le "
+               "rapport à Esri ou à votre administrateur SIG.</p>")
+
+        text = arcpy.Parameter(
+            displayName="Écrire aussi le rapport texte",
+            name="write_text",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        text.value = True
+        hinted(text,
+               "Ajoute un TXT contenant les mêmes étapes de correction.",
+               "<p><b>À quoi ça sert</b> : copier facilement le diagnostic "
+               "dans un ticket ou un courriel.</p><p><b>Défaut</b> : coché. "
+               "Le HTML et le JSON sont écrits dans tous les cas.</p>")
+
+        browser = arcpy.Parameter(
+            displayName="Ouvrir le rapport HTML",
+            name="open_browser",
+            datatype="GPBoolean",
+            parameterType="Optional",
+            direction="Input")
+        browser.value = True
+        hinted(browser,
+               "Ouvre le rapport à la fin de l'analyse.",
+               "<p><b>À quoi ça sert</b> : lire immédiatement les explications "
+               "et les étapes numérotées.</p><p><b>Défaut</b> : coché. Le "
+               "chemin du fichier reste affiché même si le navigateur ne "
+               "s'ouvre pas.</p>")
+
+        html_out = arcpy.Parameter(
+            displayName="Rapport HTML du projet",
+            name="html_report",
+            datatype="GPString",
+            parameterType="Derived",
+            direction="Output")
+        hinted(html_out,
+               "Sortie dérivée : chemin du rapport HTML.",
+               "<p><b>À quoi ça sert</b> : chaîner le rapport dans un modèle. "
+               "Ne renseignez pas cette sortie vous-même.</p>")
+
+        recovered = arcpy.Parameter(
+            displayName="Projet de récupération créé",
+            name="recovered_project",
+            datatype="DEFile",
+            parameterType="Derived",
+            direction="Output")
+        hinted(recovered,
+               "Sortie dérivée : nouveau .aprx, vide en diagnostic seul.",
+               "<p><b>À quoi ça sert</b> : retrouver la copie créée et la "
+               "chaîner à un autre outil.</p><p>Elle reste vide en diagnostic "
+               "seul, si aucune modification n'est nécessaire, ou si les "
+               "contrôles de sécurité refusent la récupération.</p>")
+        return [project, out, repair, verbose, text, browser, html_out, recovered]
+
+    def isLicensed(self):
+        return True
+
+    def updateParameters(self, parameters):
+        return
+
+    def updateMessages(self, parameters):
+        path = parameters[0].valueAsText.strip()
+        if path and not path.lower().endswith(".aprx"):
+            parameters[0].setErrorMessage(
+                "Sélectionnez un fichier portant l'extension .aprx.")
+        elif path and not os.path.isfile(path):
+            parameters[0].setErrorMessage(
+                "Le fichier sélectionné est introuvable ou inaccessible : %s" % path)
+        current = _current_project_path()
+        if path and _same_path(path, current):
+            parameters[0].setErrorMessage(
+                "Ce .aprx est le projet actuellement ouvert. Enregistrez-le, "
+                "ouvrez un autre projet, puis sélectionnez à nouveau ce fichier "
+                "ou utilisez une copie. L'outil refuse le projet actif.")
+        mode = parameters[2].valueAsText or RECOVERY_NONE
+        if mode not in RECOVERY_MODES:
+            parameters[2].setErrorMessage(
+                "Choisissez une des quatre actions proposées dans la liste.")
+        elif mode != RECOVERY_NONE:
+            parameters[2].setWarningMessage(
+                "L'original restera intact. La récupération crée un nouveau "
+                "fichier à côté de lui et seulement si les contrôles d'intégrité "
+                "l'autorisent.")
+        if mode == RECOVERY_VIEWS_HISTORY:
+            parameters[0].setWarningMessage(
+                "L'historique de géotraitement sera retiré de la copie seulement. "
+                "Conservez l'original pour retrouver les anciens paramètres.")
+        return
+
+    def execute(self, parameters, messages):
+        path = parameters[0].valueAsText.strip()
+        current = _current_project_path()
+        if not path or not path.lower().endswith(".aprx"):
+            raise arcpy.ExecuteError("Un fichier .aprx doit être sélectionné.")
+        if _same_path(path, current):
+            raise arcpy.ExecuteError(
+                "Le projet actif ne peut pas être analysé par cet outil. "
+                "Ouvrez un autre projet ou sélectionnez une copie.")
+        mode_label = parameters[2].valueAsText or RECOVERY_NONE
+        if mode_label not in RECOVERY_MODES:
+            raise arcpy.ExecuteError("Action de récupération inconnue.")
+        mode = RECOVERY_MODES[mode_label]
+        folder = (parameters[1].valueAsText or os.path.join(
+            os.environ.get("TEMP") or ".", "ArcGISPro_PerformanceAnalyser"))
+        verbose = bool(parameters[3].value)
+
+        messages.addMessage("Analyse du projet externe : %s" % path)
+        messages.addMessage("Copie instantanée temporaire ; projet actif et "
+                            "fichier source non modifiés par le diagnostic.")
+        messages.addMessage("Action : %s" % mode_label)
+        started = time.time()
+        document = engine.run_project(engine.Env(), {
+            "project_path": path, "repair": mode})
+        code = engine.exit_code(document["checks"])
+        document["exit_code"] = code
+        messages.addMessage("%d contrôles en %.1f s."
+                            % (len(document["checks"]), time.time() - started))
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        base = "diagnostic_projet_%s.html" % _safe_stem(path)
+        html_path = _unique(os.path.join(folder, base))
+        json_path = os.path.splitext(html_path)[0] + ".json"
+        meta = {"Projet analysé": path,
+                "Action demandée": mode_label,
+                "Méthode": "copie instantanée locale ; original jamais réécrit"}
+        release = _pro_release()
+        if release:
+            meta["ArcGIS Pro"] = release
+        report.write_html(document, html_path, verbose, code, meta)
+        handle = open(json_path, "wb")
+        try:
+            import json as _json
+            handle.write(_json.dumps(document, indent=1, sort_keys=True)
+                         .encode("utf-8"))
+        finally:
+            handle.close()
+        written = [html_path, json_path]
+        if parameters[4].value:
+            text_path = os.path.splitext(html_path)[0] + ".txt"
+            handle = open(text_path, "wb")
+            try:
+                handle.write(("\n".join(engine.render(document, verbose))
+                              + "\n").encode("utf-8"))
+            finally:
+                handle.close()
+            written.append(text_path)
+
+        for status, count in engine.counts(document["checks"]):
+            if count:
+                messages.addMessage("  %-8s %d" % (status.upper(), count))
+        _emit_findings(document, messages)
+        for note in document["notes"]:
+            if "REFUSÉE" in note or "ÉCHEC" in note:
+                messages.addWarningMessage(note)
+            else:
+                messages.addMessage(note)
+        for record in document["applied"]:
+            messages.addWarningMessage(
+                "COPIE CRÉÉE [%s] %s\n%s\nRetour arrière : %s"
+                % (record["id"], record["what"], record["result"],
+                   record["undo"]))
+        for written_path in written:
+            messages.addMessage("  report: %s" % written_path)
+        parameters[6].value = html_path
+        parameters[7].value = document.get("recovery", {}).get("path") or ""
+
+        if parameters[5].value:
+            try:
+                import webbrowser
+                webbrowser.open("file:///" + html_path.replace("\\", "/"))
+                messages.addMessage("Rapport HTML ouvert dans le navigateur.")
+            except Exception as exc:
+                messages.addWarningMessage(
+                    "Ouverture du navigateur impossible (%s). Rapport : %s"
+                    % (exc, html_path))
+        messages.addMessage("Le rapport contient des chemins et noms de couches. "
+                            "Relisez-le avant de le transmettre.")
+        messages.addMessage("Code de sortie %d : %s"
                             % (code, report.EXIT_MEANING.get(code, "?")))
         return

@@ -58,7 +58,7 @@ STATUS_FR = {
 
 EXIT_MEANING = {
     0: "Nothing to act on.",
-    1: "Performance findings, none of them bearing on lost edits.",
+    1: "Measured findings, none of them bearing on lost edits.",
     2: "At least one finding bearing on lost edits.",
     3: "No finding, and nothing was determined either.",
     64: "A usage error, or the report could not be written.",
@@ -77,6 +77,7 @@ SYMPTOM_FALLBACK = (
            "redessine pas"),
     ("S5", "un copier ou coller d'entite ne fait rien pendant plusieurs "
            "secondes, et les tentatives suivantes le dupliquent"),
+    ("S6", "ArcGIS Pro se ferme ou le projet plante pendant son ouverture"),
 )
 
 # What each finding costs the score. A finding that bears on lost edits costs
@@ -437,6 +438,17 @@ Consolas,"Courier New",monospace}
 padding:9px 11px;font-size:13px;margin-top:8px}
 .check.is-fail .sol,.check.is-warn .sol{background:#f7fbf8}
 .impact{font-size:13px;color:var(--mut)}
+.why{font-size:13px;color:var(--ink)}
+.steps{margin:6px 0 0;padding-left:1.45rem;font-size:13px}
+.steps li{margin:.4rem 0;padding-left:.15rem}
+.steps li::marker{font-weight:700;color:var(--accent)}
+.verify{margin-top:8px;padding:8px 10px;border-left:3px solid var(--info);
+background:#f3f8ff;font-size:13px}
+.guide{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;
+margin:12px 0}
+.guide>div{background:var(--card);border:1px solid var(--line);border-radius:8px;
+padding:10px 12px;font-size:13px}
+.guide b{display:block;color:var(--accent);margin-bottom:3px}
 .srclist{margin:0;padding-left:1.1rem;font-size:13px}
 .srclist li{margin:.15rem 0}
 .srclist a{color:#0b5cad;text-decoration:none;word-break:break-word}
@@ -494,6 +506,8 @@ nav.toc a.hot .n{background:#3d1512;color:var(--bad)}
 .banner.calm{background:#0f2417;border-color:var(--good)}
 .banner.undone{background:#0e1c2c;border-color:var(--info)}
 .sol{background:#132318;border-color:#24462e}
+.verify{background:#0e1c2c}
+.guide>div{background:#171b21}
 code,.chip{background:#232931}}
 """
 
@@ -594,6 +608,13 @@ def _banner(document):
                 'premier &mdash; ces trouvailles portent sur les modifications '
                 'perdues</h3><ul>%s</ul></div>' % items)
     verdicts = [c for c in checks if c.get("status") in ("Fail", "Warn")]
+    if verdicts and document.get("analysis_type") == "project":
+        return ('<div class="banner undone"><h3>Anomalies d&eacute;tect&eacute;es '
+                'dans le projet s&eacute;lectionn&eacute;</h3><p>%d contr&ocirc;le(s) '
+                '&agrave; traiter. Lisez PR-01 et PR-02 en premier pour la '
+                'corruption, puis PR-05 si Pro plante en rouvrant une vue. '
+                'Chaque carte donne les &eacute;tapes et la v&eacute;rification.'
+                '</p></div>' % len(verdicts))
     if verdicts:
         return ('<div class="banner undone"><h3>Findings de performance '
                 'seulement</h3><p>%d trouvaille(s), aucune ne porte sur des '
@@ -609,6 +630,29 @@ def _banner(document):
     return ('<div class="banner calm"><h3>Rien &agrave; traiter</h3>'
             '<p>Tous les contr&ocirc;les qui ont pu &ecirc;tre lus sont '
             'conformes.</p></div>')
+
+
+def _reading_guide(document):
+    """A short, explicit reading order before the technical cards."""
+    project = document.get("analysis_type") == "project"
+    intro = ("Ce rapport analyse uniquement le fichier .aprx indiqué dans "
+             "l'en-tête, à partir d'une copie instantanée. Le projet actif "
+             "n'est ni ouvert ni modifié par ce diagnostic." if project else
+             "Chaque anomalie ci-dessous est fondée sur une valeur réellement "
+             "lue sur ce poste. Info et Non mesuré ne sont pas des preuves de "
+             "panne.")
+    return ('<section id="mode-emploi"><h2>Comment lire et corriger</h2>'
+            '<p class="lead">%s</p><div class="guide">'
+            '<div><b>1. Lire la mesure</b>La ligne « problème détecté » '
+            'indique les faits et les chemins concernés.</div>'
+            '<div><b>2. Comprendre l&rsquo;impact</b>Elle est suivie de '
+            'l&rsquo;explication et des effets possibles dans ArcGIS Pro, '
+            'sans confondre corrélation et cause certaine.</div>'
+            '<div><b>3. Agir dans l&rsquo;ordre</b>Suivez les étapes '
+            'numérotées. Testez une correction à la fois sur une copie.</div>'
+            '<div><b>4. Vérifier le résultat</b>Rejouez le même scénario '
+            'puis relancez le contrôle indiqué avant de reprendre la '
+            'production.</div></div></section>' % esc(intro))
 
 
 def _check_card(check):
@@ -629,20 +673,42 @@ def _check_card(check):
                     if check.get("dataloss") else "",
                     esc(check.get("title")), esc(check.get("category"))))
 
-    if finding:
-        parts.append('<div class="blk"><div class="h">Probl&egrave;me '
-                     'd&eacute;tect&eacute;</div>%s</div>'
-                     % _multiline(check.get("observed")))
-        if check.get("impact"):
-            parts.append('<div class="blk"><div class="h">Impact</div>'
-                         '<div class="impact">%s</div></div>'
-                         % esc(check.get("impact")))
-        if check.get("fix"):
-            parts.append('<div class="sol"><div class="h">Correction / '
-                         'optimisation</div>%s</div>' % esc(check.get("fix")))
-    else:
-        parts.append('<div class="blk">%s</div>'
-                     % _multiline(check.get("observed")))
+    parts.append('<div class="blk"><div class="h">%s</div>%s</div>'
+                 % ("Probl&egrave;me d&eacute;tect&eacute; &mdash; valeurs "
+                    "mesur&eacute;es" if finding else "R&eacute;sultat du "
+                    "contr&ocirc;le", _multiline(check.get("observed"))))
+
+    explanation = check.get("explanation")
+    impact_fr = check.get("impact_fr")
+    steps = check.get("steps") or []
+    verification = check.get("verification")
+    # Pass needs no remediation panel. Info and Skipped do: their actions tell
+    # the reader how to obtain the missing measurement instead of pretending
+    # that a cause was found.
+    show_actions = finding or status in ("Info", "Skipped")
+    if explanation and show_actions:
+        parts.append('<div class="blk"><div class="h">Pourquoi ce '
+                     'r&eacute;sultat est important</div>'
+                     '<div class="why">%s</div></div>' % esc(explanation))
+    if show_actions and (impact_fr or check.get("impact")):
+        parts.append('<div class="blk"><div class="h">Impact concret sur '
+                     'ArcGIS Pro</div><div class="impact">%s</div></div>'
+                     % esc(impact_fr or check.get("impact")))
+    if steps and show_actions:
+        items = "".join("<li>%s</li>" % esc(step) for step in steps)
+        parts.append('<div class="sol"><div class="h">%s</div>'
+                     '<ol class="steps">%s</ol></div>'
+                     % ("Actions &agrave; prendre, dans l&rsquo;ordre"
+                        if finding else "Comment lever le point bloquant",
+                        items))
+    elif finding and check.get("fix"):
+        # Compatibility for a document produced before format 4 or for a
+        # caller-defined check that has no entry in the guidance table.
+        parts.append('<div class="sol"><div class="h">Correction / '
+                     'optimisation</div>%s</div>' % esc(check.get("fix")))
+    if verification and show_actions:
+        parts.append('<div class="verify"><b>V&eacute;rification apr&egrave;s '
+                     'correction :</b> %s</div>' % esc(verification))
 
     # Sources are rendered for EVERY status, not only Warn/Fail: an Info
     # check is still a check whose reference someone may want to read.
@@ -667,27 +733,28 @@ def _check_card(check):
 
     extras = []
     if check.get("expected"):
-        extras.append('<div class="blk"><div class="h">Attendu</div>'
-                      '<div class="impact">%s</div></div>'
+        extras.append('<div class="blk"><div class="h">Valeur ou &eacute;tat '
+                      'attendu</div><div class="impact">%s</div></div>'
                       % esc(check.get("expected")))
-    if not finding and check.get("impact"):
-        extras.append('<div class="blk"><div class="h">Impact</div>'
-                      '<div class="impact">%s</div></div>'
+    if check.get("impact") and impact_fr:
+        extras.append('<div class="blk"><div class="h">Impact technique '
+                      'd&rsquo;origine</div><div class="impact">%s</div></div>'
                       % esc(check.get("impact")))
-    if not finding and check.get("fix"):
+    if check.get("fix") and (steps or not finding):
         extras.append('<div class="blk"><div class="h">Correction / '
-                      'optimisation</div><div class="impact">%s</div></div>'
+                      'optimisation &mdash; d&eacute;tails techniques'
+                      '</div><div class="impact">%s</div></div>'
                       % esc(check.get("fix")))
     if check.get("detail"):
-        extras.append('<div class="blk"><div class="h">Preuve</div>%s</div>'
-                      % _multiline(check.get("detail")))
+        extras.append('<div class="blk"><div class="h">Preuve compl&eacute;mentaire'
+                      '</div>%s</div>' % _multiline(check.get("detail")))
     if check.get("autofixable"):
         extras.append('<div class="blk"><div class="h">Automatisable</div>'
                       '<div class="impact">oui &mdash; relancez avec les '
                       'correctifs activ&eacute;s</div></div>')
     if extras:
-        parts.append('<details><summary>attendu, preuve et correctif '
-                     'manuel</summary>%s</details>' % "".join(extras))
+        parts.append('<details><summary>attendu, preuve et d&eacute;tails '
+                     'techniques</summary>%s</details>' % "".join(extras))
     parts.append("</article>")
     return "".join(parts)
 
@@ -791,11 +858,17 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
     code = exit_code if exit_code is not None else document.get("exit_code")
     dl_block, dl_total = _checks_section(document, True, "perte-donnees",
                                          "Perte de donn&eacute;es")
+    perf_heading = ("Analyse du projet s&eacute;lectionn&eacute;"
+                    if document.get("analysis_type") == "project" else
+                    "Performance")
     perf_block, perf_total = _checks_section(document, False, "performance",
-                                             "Performance")
+                                             perf_heading)
     act = len(document.get("act_first") or [])
 
-    head = ['<header class="top"><h1>Diagnostic de poste ArcGIS Pro</h1>',
+    report_title = ("Diagnostic d'un projet .aprx externe"
+                    if document.get("analysis_type") == "project" else
+                    "Diagnostic de poste ArcGIS Pro")
+    head = ['<header class="top"><h1>%s</h1>' % esc(report_title),
             '<div class="sub">ArcGIS Pro Performance Analyser &mdash; format de rapport %s &middot; '
             'relev&eacute; le <b>%s UTC</b> &middot; compte <b>%s</b> &middot; '
             '&eacute;lev&eacute; <b>%s</b></div>'
@@ -811,13 +884,15 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
 
     toc = ['<nav class="toc"><ul>',
            '<li><a href="#synthese">Synth&egrave;se</a></li>',
+           '<li><a href="#mode-emploi">Mode d&rsquo;emploi</a></li>',
            '<li><a href="#jauges">Jauges</a></li>',
            '<li><a href="#symptomes">Drapeaux</a></li>',
            '<li><a class="%s" href="#perte-donnees">Perte de donn&eacute;es'
            '<span class="n">%d</span></a></li>'
            % ("hot" if act else "", dl_total),
-           '<li><a href="#performance">Performance<span class="n">%d</span>'
-           '</a></li>' % perf_total,
+           '<li><a href="#performance">%s<span class="n">%d</span>'
+           '</a></li>' % ("Projet" if document.get("analysis_type") == "project"
+                          else "Performance", perf_total),
            '<li><a href="#correctifs">Correctifs</a></li>',
            '<li><a href="#legende">L&eacute;gende</a></li>',
            '<li><a href="#json">JSON</a></li>',
@@ -842,6 +917,7 @@ def render_html(document, verbose=False, exit_code=None, meta=None):
     body = ["".join(head), "".join(toc), '<div class="wrap">',
             '<section id="synthese"><h2>Synth&egrave;se</h2>',
             _banner(document), _kpi_cards(document), "</section>",
+            _reading_guide(document),
             '<section id="jauges"><h2>Jauges</h2><p class="lead">Chaque jauge '
             'est dessin&eacute;e &agrave; partir d&rsquo;un nombre que le '
             'contr&ocirc;le a mesur&eacute;, jamais d&rsquo;une phrase '
