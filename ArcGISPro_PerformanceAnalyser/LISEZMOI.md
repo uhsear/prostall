@@ -12,7 +12,7 @@ le poste où le fichier atterrit.
 
 | Fichier | Rôle |
 |---|---|
-| `Diagnostiquer_ArcGIS_Pro.bat` (à la racine) | Lanceur Windows en lecture seule, avec rapports TXT, JSON et HTML ; nécessite le moteur et le rendu à côté de lui |
+| `Diagnostiquer_ArcGIS_Pro.bat` (à la racine) | Lecture seule par défaut, avec rapports TXT, JSON et HTML ; modes explicites AP-01, réparation de copie `.aprx` et quarantaine/restauration d'add-in ; nécessite le moteur et le rendu à côté de lui |
 | `ArcGISPro_PerformanceAnalyser.pyt` | **L'artefact livré.** Deux outils, moteur et rendu inclus |
 | `arcgis_pro_performance_analyser.py` | Le moteur de diagnostic et sa ligne de commande. Sans `arcpy` |
 | `html_report.py` | Le rendu HTML. Fonction pure sur le document de rapport, sans `arcpy` |
@@ -53,7 +53,8 @@ bibliothèque standard uniquement.
 
 **Double-cliquez sur `Diagnostiquer_ArcGIS_Pro.bat`.** Le lanceur recherche le
 Python d'ArcGIS Pro, puis `py -3` et `python` en secours. Il ne lance pas
-`ArcGISPro.exe`, ne charge aucun add-in et ne passe jamais `--apply`. Pour les
+`ArcGISPro.exe` et ne charge aucun add-in. En mode diagnostic par défaut, il ne
+passe pas `--apply`. Pour les
 contrôles de projets récents, ArcGIS Pro doit être fermé ; le diagnostic du
 splash screen et des packages de démarrage ne nécessite pas de l'ouvrir.
 
@@ -68,9 +69,61 @@ Diagnostiquer_ArcGIS_Pro.bat "D:\Diagnostics\Poste"
 
 La fenêtre reste ouverte et affiche le dossier ainsi que les erreurs de Python,
 de diagnostic ou d'écriture. Les codes 0 à 3 signifient que le diagnostic a
-terminé ; 1 et 2 signalent des constats à lire. Le code 64 signale un usage ou
-une écriture invalide. Le lanceur ne répare aucun projet et ne modifie ni le
-registre ni les add-ins.
+terminé ; 1 et 2 signalent des constats à lire. Le code 64 signale un usage,
+une action refusée ou une écriture invalide. **Sans argument**, le lanceur ne
+répare aucun projet et ne modifie ni le registre ni les add-ins.
+
+### Actions de dépannage explicites du même `.bat`
+
+Fermez ArcGIS Pro avant toute action de poste ou de quarantaine. Les modes
+suivants ne sont jamais déclenchés par le double-clic par défaut :
+
+```bat
+rem Correctif automatisé limité au renommage réversible du cache (AP-01)
+Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes
+
+rem Réparation du projet dans une nouvelle copie, jamais dans l'original
+Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "D:\GIS\Projet.aprx" views
+Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "D:\GIS\Projet.aprx" views_history
+Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "D:\GIS\Projet.aprx" repack
+
+rem Retrait réversible du chargement d'un package exact affiché par PF-31
+Diagnostiquer_ArcGIS_Pro.bat --quarantine-addin "D:\AddIns\Vendor.esriAddinX"
+
+rem Restauration avec le manifeste affiché lors de la quarantaine
+Diagnostiquer_ArcGIS_Pro.bat --restore-addin "D:\Quarantine\quarantine-...\quarantine.json"
+```
+
+`views` retire seulement l'état des vues au démarrage dans la copie ;
+`views_history` retire aussi l'historique de géotraitement dans la copie ;
+`repack` reconstruit seulement le conteneur ZIP. Les définitions des cartes et
+mises en page ne sont pas supprimées par `views`. Une archive ou un JSON dont
+l'intégrité est mauvaise bloque la récupération au lieu de produire une copie
+prétendument réparée.
+
+La quarantaine **n'est pas une suppression définitive ni une accusation
+automatique**. Elle retire le package choisi des dossiers chargés au démarrage,
+tout en conservant ses octets et une commande d'annulation. Elle exige :
+
+- le chemin exact d'un package trouvé par PF-31, et non un fichier arbitraire ;
+- la certitude que Pro est fermé ; une liste de processus illisible bloque
+  l'action ;
+- une copie vérifiée par SHA-256 et taille, avec un manifeste écrit avant le
+  retrait de la source ;
+- un dossier hors de tout emplacement de chargement par défaut, redirigé ou
+  enregistré ;
+- pour un package HKLM/machine-wide, l'accord d'un administrateur et l'ajout de
+  `--confirm-machine-wide` après le chemin du package.
+
+La restauration vérifie de nouveau l'empreinte et refuse d'écraser un package
+qui est réapparu. Elle conserve aussi la sauvegarde de quarantaine. Après une
+quarantaine ou une restauration réussie, le `.bat` lance un nouveau diagnostic
+et ouvre son HTML. Testez un seul package à la fois ; si le démarrage ne change
+pas, restaurez-le avant de tester le suivant.
+
+Aucun de ces modes ne peut garantir de trouver ou réparer **toutes** les pannes
+possibles : pilote, installation, profil, matériel, serveur ou corruption CIM
+non prise en charge peuvent exiger une autre procédure ou le support Esri.
 
 ## Si ArcGIS Pro plante au splash screen, avant tout projet
 
@@ -103,7 +156,12 @@ de projet, de géodatabase ou de profil :
    Application Error 1000 lorsqu'il existe ; sa présence dans un package est un
    indice corrélé, pas une preuve automatique. Le rapport conserve aussi les
    dumps, le GPU/pilote, les profils, la mémoire, le stockage et les autres
-   pistes de crash.
+   pistes de crash. Pour isoler un package précis, fermez Pro puis utilisez
+   `Diagnostiquer_ArcGIS_Pro.bat --quarantine-addin "chemin_exact_du_package"`.
+   Relancez Pro normalement. Le manifeste `quarantine.json` et la commande
+   `--restore-addin` permettent de revenir en arrière ; ne supprimez pas la
+   sauvegarde. Un démarrage réussi après cette isolation est un indice plus
+   fort, mais n'exclut pas une interaction ou une seconde cause.
 4. **Si le crash persiste**, suivez le
    [soft reset officiel Esri](https://support.esri.com/en-us/knowledge-base/how-to-perform-an-arcgis-pro-soft-reset-000027631) :
    fermez toutes les applications ArcGIS, rendez d'abord toute licence
@@ -148,8 +206,9 @@ un exemple.
 
 **Le diagnostic exécuté dans ArcGIS Pro ne modifie plus le poste**, même si un
 ancien modèle force le paramètre historique `apply_fixes`. Le seul correctif de
-poste encore automatisé est **AP-01**, à lancer avec le script Python, **Pro
-fermé** : il renomme le dossier de cache ESRI en lui ajoutant
+poste encore automatisé est **AP-01**, à lancer avec le script Python ou
+`Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes`, **Pro fermé** : il renomme
+le dossier de cache ESRI en lui ajoutant
 `.properf-<date>`. **Rien n'est supprimé** et sa commande d'annulation est
 inscrite dans le rapport.
 
@@ -244,7 +303,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 770 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 787 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -427,8 +486,8 @@ rapport le dit.
 ## Vérifier
 
 ```
-python tests/test_toolbox.py      # 135 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 770 assertions sur le diagnostic
+python tests/test_toolbox.py      # 139 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
+python arcgis_pro_performance_analyser.py --self-test   # 787 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 

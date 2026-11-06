@@ -473,17 +473,31 @@ check("<html lang=\"fr\">" in page,
 # =============================================================================
 
 print("-" * 70)
-print("the batch launcher is a read-only three-report entry point")
+print("the batch launcher exposes diagnostics and explicit recoverable actions")
 batch = io.open(os.path.join(ROOT, "Diagnostiquer_ArcGIS_Pro.bat"),
                 encoding="utf-8").read()
-command_lines = [line for line in batch.splitlines()
-                 if line.startswith("%PYTHON% ")]
-check(len(command_lines) == 1
-      and '--report "%OUT%" --html --verbose' in command_lines[0],
-      "the launcher writes TXT, JSON and HTML in verbose mode")
-check(all("--apply" not in line and "ArcGISPro.exe" not in line
-          for line in command_lines),
-      "it neither enables a fix nor launches ArcGIS Pro")
+python_lines = [line.strip() for line in batch.splitlines()
+                if '"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%"' in line]
+check(len(python_lines) == 4
+      and any('--report "%OUT%" --html --verbose %ACTION_FLAG%' in line
+              for line in python_lines),
+      "the default diagnostic writes TXT, JSON and HTML in verbose mode")
+check(all(line.startswith('"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%"')
+          for line in python_lines),
+      "the Python executable is quoted, including Pro's Program Files path")
+check(all("ArcGISPro.exe" not in line for line in python_lines),
+      "no batch mode launches ArcGIS Pro itself")
+check(any('--project "%PROJECT%" --project-repair "%REPAIR_MODE%"' in line
+          for line in python_lines)
+      and 'REPORT_PATTERN=arcgis_pro_project_analysis_*.html' in batch,
+      "the batch exposes all engine project-repair modes and their HTML report")
+check(any('--quarantine-addin "%PACKAGE%" %MACHINE_FLAG%' in line
+          for line in python_lines)
+      and any('--restore-addin "%MANIFEST%"' in line for line in python_lines),
+      "quarantine, machine-wide confirmation and manifest restore are wired")
+check('set "MODE=diagnose"' in batch and 'set "ACTION_FLAG="' in batch
+      and 'if /i "%MODE%"=="apply" set "ACTION_FLAG=--apply"' in batch,
+      "only the explicit safe-fix mode arms --apply; the default remains read-only")
 check("DisableDelayedExpansion" in batch and "chcp 65001" in batch
       and "endlocal & exit /b %RC%" in batch,
       "paths are handled safely and the diagnostic exit code reaches the caller")

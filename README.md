@@ -2,8 +2,9 @@
 
 Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did
 not produce. Read-only by default: nothing changes, and no host is contacted unless you name it.
-Two flags write: `--report` creates report files in a folder you name, and `--apply` runs one
-gated, reversible cache fix with ArcGIS Pro closed. The one read that crosses the network unasked is a project folder that already lives
+Explicit options can write reports, run one gated cache fix, create a verified `.aprx` recovery
+copy, or quarantine one exact startup package with SHA-256 verification and a restore manifest.
+The one read that crosses the network unasked is a project folder that already lives
 on a share, as Pro does when it opens the project.
 
 An editor tells you Pro takes five minutes to open, that it hangs for two or three minutes in the
@@ -193,7 +194,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-770 assertions, 0 failed
+787 assertions, 0 failed
 ```
 
 ## Requirements
@@ -220,7 +221,7 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The suite contains 770 assertions with platform-neutral labels. That matters more than it sounds:
+The suite contains 787 assertions with platform-neutral labels. That matters more than it sounds:
 the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
 the standard library answers for the host instead of for the path. The reads that only exist on
 Windows are also exercised with the platform switched off, so Linux and Windows can cover each
@@ -260,8 +261,27 @@ question, runs the read-only workstation diagnostic and opens the resulting
 HTML report. TXT and JSON are written beside the HTML. The default folder is
 `%LOCALAPPDATA%\\ArcGISPro_PerformanceAnalyser\\Rapports`; pass another local
 folder as the batch file's first argument if needed. The console shows report
-and launcher failures and stays open until you read them. The launcher never
-passes `--apply`, never repairs a project and never starts `ArcGISPro.exe`.
+and launcher failures and stays open until you read them. This default mode
+never passes `--apply`, never repairs a project or add-in, and never starts
+`ArcGISPro.exe`.
+
+The same batch exposes separate, explicitly selected actions:
+
+```bat
+Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes
+Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "D:\GIS\Broken.aprx" views
+Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "D:\GIS\Broken.aprx" views_history
+Diagnostiquer_ArcGIS_Pro.bat --quarantine-addin "D:\AddIns\Vendor.esriAddinX"
+Diagnostiquer_ArcGIS_Pro.bat --restore-addin "D:\Quarantine\quarantine-...\quarantine.json"
+```
+
+`--apply-safe-fixes` exposes only the existing gated AP-01 cache rename. Project
+modes also accept `repack` and `none`; every repair writes a new project beside
+the source. Quarantine requires the exact package path copied from PF-31 and
+Pro closed. It removes that package from startup loading but preserves its
+bytes, hash and restore manifest. After quarantine or restore, the batch runs a
+fresh diagnostic and opens its HTML report. See the safety gates below before
+using these modes.
 
 For a scripted run, use the editor's own session, without elevation, while Pro
 is closed:
@@ -312,6 +332,10 @@ This writes `Broken_recuperation_sans_vues.aprx` beside the original. It removes
 | `--project APRX` | none | Run the eleven-check selected-project analysis instead of the workstation analysis. Uses a snapshot; safe to use while another project is open. |
 | `--project-repair MODE` | `none` | With `--project`: `repack`, `views`, or `views_history`. Writes a verified new copy beside the source, never overwrites the source. `--apply` cannot be combined with this mode. |
 | `--apply` | off | Run the gated cache fix. It is refused unless its check actually failed and Pro is closed, prints its own undo, and never deletes anything. It never changes the GPU preference. |
+| `--quarantine-addin PACKAGE` | none | Move this exact PF-31-discovered package into verified quarantine. Pro must be closed; arbitrary files are refused. Standalone action, not an automatic diagnosis or fix. |
+| `--quarantine-dir DIR` | analyser folder under `LOCALAPPDATA` | Parent for quarantine transactions. It must be outside every discovered startup-loading folder. |
+| `--restore-addin MANIFEST` | none | Restore the exact package from `quarantine.json`, verifying SHA-256/size and refusing to overwrite an existing file. |
+| `--confirm-machine-wide` | off | Separately confirm administrator-approved quarantine of an HKLM/machine-wide package, which can affect every user. |
 
 Every parser error is exit 64, including a refused abbreviation such as `--ap`. No abbreviation is
 accepted, so a prefix of `--apply` cannot arm the fix path.
@@ -499,7 +523,7 @@ enforced rather than documented:
 | 1 | Measured workstation or project findings, none bearing on lost edits. |
 | 2 | At least one finding bearing on lost edits. |
 | 3 | No finding, and nothing was determined either. |
-| 64 | A usage error, or `--report` could not write its files. |
+| 64 | A usage error, a refused/incomplete add-in action, or `--report` could not write its files. |
 
 Code 3 exists because a wrapper reads the exit code and never sees the note on stderr. A run that
 could read nothing, such as PowerShell blocked or a host that is not Windows, has no finding, and
@@ -534,6 +558,40 @@ exact `undo` command. The same run's TXT report prints that command after `undo 
 escaping, so it is the easiest version to copy. This restores the recorded previous value instead
 of guessing whether the registry value should be deleted or changed. As a separate, non-mutating isolation test, Esri
 supports launching `"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe" /disableaddins`.
+
+### Explicit add-in quarantine and restore
+
+Quarantine is **not** an automatic repair and PF-31 never selects a package as
+the culprit. The operator chooses one exact path from the inventory, ideally
+one package at a time after `/disableaddins` has changed the result. The action
+then enforces these gates:
+
+- Windows, a readable current PF-31 discovery, and a process list proving Pro
+  is closed; a running Pro or unreadable process list refuses the move;
+- only a discovered `.esriAddinX`, `.proConfigX` or `.esriPlugin` package;
+  machine-wide packages additionally require `--confirm-machine-wide`;
+- a quarantine outside every default, redirected and registered loading
+  folder, with a verified copy and a manifest written **before** the loading
+  copy is removed;
+- identical source/copied SHA-256 and size, and a source that did not change
+  during copying. A failed copy leaves the source in place;
+- restore only from the manifest's own transaction folder, with the expected
+  package name and unchanged hash. An existing destination, missing parent or
+  altered backup is refused and never overwritten.
+
+The manifest records package identity, discovery indicators, original/backup
+paths, hash, installed Pro version and an undo command. Restore retains the
+backup as an additional safeguard. There is deliberately no permanent-purge
+command: quarantine removes the add-in from Pro's startup path without making
+an uncertain diagnosis irreversible. Test normal startup after each isolation;
+if nothing changes, restore that package before testing another.
+
+The CLI add-in action is standalone so its result cannot be confused with a
+40-check diagnostic document. The batch runs a separate diagnostic after a
+successful action. No diagnostic or recovery mode can promise to find or fix
+every possible ArcGIS Pro fault; drivers, installation damage, profiles,
+hardware, server faults and unsupported CIM corruption can require other
+evidence or Esri support.
 
 Nothing else is automated in the workstation run, on purpose. OneDrive redirection, the project
 location, the power plan, Defender, the adapter power setting, the GPU preference, the SMB client,
@@ -589,13 +647,13 @@ missing on the machine it lands on.
 
 | File | What it is |
 |---|---|
-| `Diagnostiquer_ArcGIS_Pro.bat` | Read-only Windows launcher for TXT, JSON and HTML without opening ArcGIS Pro; keep the engine and renderer beside it |
+| `Diagnostiquer_ArcGIS_Pro.bat` | Windows launcher: read-only TXT/JSON/HTML by default, plus explicit AP-01, `.aprx` recovery-copy and add-in quarantine/restore modes; keep the engine and renderer beside it |
 | `ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt` | **The shipped artefact.** Two tools, with the engine and the renderer inlined |
 | `arcgis_pro_performance_analyser.py` | The diagnostic engine and CLI. A single file, no `arcpy` import |
 | `html_report.py` | The HTML renderer. A pure function over the report document, no `arcpy` |
 | `toolbox_glue.py` | The ArcGIS Pro glue. The only part that imports `arcpy` |
 | `build_toolbox.py` | Assembles those three into the one `.pyt` |
-| `tests/test_toolbox.py` | 135 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
+| `tests/test_toolbox.py` | 139 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
 
 Install by copying that one `.pyt` anywhere stable, then Catalog pane > Toolboxes > Add Toolbox,
 pointing at it. The tool appears under "ArcGIS Pro Performance Analyser".
@@ -652,8 +710,8 @@ Pro and run `arcgis_pro_performance_analyser.py` in the editor's own session. Th
 while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
-python tests/test_toolbox.py      # 135 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 770 assertions over the diagnostic
+python tests/test_toolbox.py      # 139 assertions over the renderer, both tools and project recovery
+python arcgis_pro_performance_analyser.py --self-test   # 787 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 

@@ -3,24 +3,71 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>&1
 pushd "%~dp0"
 
-rem Read-only workstation diagnostic. Do not add --apply here.
-rem Optional argument: a local output folder for the reports.
+rem Default: read-only diagnostic. Mutating modes require an explicit argument.
 set "SCRIPT=%~dp0arcgis_pro_performance_analyser.py"
 set "RENDERER=%~dp0html_report.py"
+set "MODE=diagnose"
+set "OUT="
+set "PROJECT="
+set "REPAIR_MODE=views"
+set "PACKAGE="
+set "MANIFEST="
+set "MACHINE_FLAG="
+set "SHOW_HELP="
+set "REPORT_PATTERN=arcgis_pro_performance_analyser_*.html"
+
+if "%~1"=="" goto DEFAULTS
+if /i "%~1"=="--repair-aprx" (
+    set "MODE=repair"
+    set "PROJECT=%~2"
+    set "REPORT_PATTERN=arcgis_pro_project_analysis_*.html"
+    if not "%~3"=="" set "REPAIR_MODE=%~3"
+    if not "%~4"=="" goto USAGE
+    goto DEFAULTS
+)
+if /i "%~1"=="--quarantine-addin" (
+    set "MODE=quarantine"
+    set "PACKAGE=%~2"
+    if /i "%~3"=="--confirm-machine-wide" set "MACHINE_FLAG=--confirm-machine-wide"
+    if not "%~3"=="" if not defined MACHINE_FLAG goto USAGE
+    if not "%~4"=="" goto USAGE
+    goto DEFAULTS
+)
+if /i "%~1"=="--restore-addin" (
+    set "MODE=restore"
+    set "MANIFEST=%~2"
+    if not "%~3"=="" goto USAGE
+    goto DEFAULTS
+)
+if /i "%~1"=="--apply-safe-fixes" (
+    set "MODE=apply"
+    if not "%~2"=="" goto USAGE
+    goto DEFAULTS
+)
+if /i "%~1"=="--help" (
+    set "SHOW_HELP=1"
+    goto USAGE
+)
 set "OUT=%~1"
+if not "%~2"=="" goto USAGE
+
+:DEFAULTS
 if not defined OUT set "OUT=%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports"
 if not defined LOCALAPPDATA set "OUT=%~dp0Rapports"
-
 if not exist "%SCRIPT%" goto MISSING_FILES
 if not exist "%RENDERER%" goto MISSING_FILES
 
 set "PYTHON="
+set "PYTHON_ARGS="
 if exist "%ProgramFiles%\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe" (
     set "PYTHON=%ProgramFiles%\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe"
 )
 if not defined PYTHON (
     where py >nul 2>nul
-    if not errorlevel 1 set "PYTHON=py -3"
+    if not errorlevel 1 (
+        set "PYTHON=py"
+        set "PYTHON_ARGS=-3"
+    )
 )
 if not defined PYTHON (
     where python >nul 2>nul
@@ -28,25 +75,79 @@ if not defined PYTHON (
 )
 if not defined PYTHON goto NO_PYTHON
 
+if /i "%MODE%"=="repair" goto REPAIR_PROJECT
+if /i "%MODE%"=="quarantine" goto QUARANTINE_ADDIN
+if /i "%MODE%"=="restore" goto RESTORE_ADDIN
+goto RUN_DIAGNOSTIC
+
+:RUN_DIAGNOSTIC
+set "ACTION_FLAG="
+if /i "%MODE%"=="apply" set "ACTION_FLAG=--apply"
 echo.
-echo === Diagnostic ArcGIS Pro - lecture seule ===
+if /i "%MODE%"=="apply" (
+    echo === Diagnostic et correctif sur reversible AP-01 ===
+    echo ArcGIS Pro doit etre ferme. Aucune preference GPU n'est modifiee.
+) else (
+    echo === Diagnostic ArcGIS Pro - lecture seule ===
+)
 echo Pour les controles de projets recents, ArcGIS Pro doit etre ferme.
 echo Les add-ins sont inventories sans charger leur code.
-echo Rapports : %OUT%
+echo Rapports : "%OUT%"
 echo.
-
-%PYTHON% "%SCRIPT%" --report "%OUT%" --html --verbose
+"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%" --report "%OUT%" --html --verbose %ACTION_FLAG%
 set "RC=%ERRORLEVEL%"
+goto AFTER_REPORT
 
+:REPAIR_PROJECT
+if not defined PROJECT goto USAGE
+echo.
+echo === Reparation d'un projet ArcGIS Pro sur une nouvelle copie ===
+echo Mode : "%REPAIR_MODE%". L'original n'est jamais reecrit.
+echo Rapports : "%OUT%"
+echo.
+"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%" --project "%PROJECT%" --project-repair "%REPAIR_MODE%" --report "%OUT%" --html --verbose
+set "RC=%ERRORLEVEL%"
+goto AFTER_REPORT
+
+:QUARANTINE_ADDIN
+if not defined PACKAGE goto USAGE
+echo.
+echo === Quarantaine reversible d'un package ArcGIS Pro ===
+echo Le package exact est retire du chargement, copie avec SHA-256 et conserve.
+echo ArcGIS Pro doit etre ferme. Aucun package n'est choisi automatiquement.
+echo.
+"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%" --quarantine-addin "%PACKAGE%" %MACHINE_FLAG%
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" goto ACTION_FAILED
+echo.
+echo Quarantaine terminee. Le diagnostic de controle va maintenant s'executer.
+set "MODE=diagnose"
+goto RUN_DIAGNOSTIC
+
+:RESTORE_ADDIN
+if not defined MANIFEST goto USAGE
+echo.
+echo === Restauration reversible d'un package ArcGIS Pro ===
+echo Aucun fichier existant ne sera remplace. ArcGIS Pro doit etre ferme.
+echo.
+"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%" --restore-addin "%MANIFEST%"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" goto ACTION_FAILED
+echo.
+echo Restauration terminee. Le diagnostic de controle va maintenant s'executer.
+set "MODE=diagnose"
+goto RUN_DIAGNOSTIC
+
+:AFTER_REPORT
 if %RC% LEQ 3 goto FIND_REPORT
 echo.
-echo Le diagnostic n'a pas pu produire tous les rapports. Code : %RC%
-echo Lisez les messages ci-dessus et le dossier de sortie.
+echo L'operation ou l'ecriture des rapports a echoue. Code : %RC%
+echo Lisez les messages ci-dessus. Un manifeste de quarantaine affiche reste valable.
 goto FINISH
 
 :FIND_REPORT
 set "LATEST="
-for /f "delims=" %%F in ('dir /b /a-d /o-d "%OUT%\arcgis_pro_performance_analyser_*.html" 2^>nul') do (
+for /f "delims=" %%F in ('dir /b /a-d /o-d "%OUT%\%REPORT_PATTERN%" 2^>nul') do (
     set "LATEST=%%~fF"
     goto OPEN_REPORT
 )
@@ -57,15 +158,29 @@ if defined LATEST start "" "%LATEST%"
 
 :REPORT_DONE
 echo.
-echo Diagnostic termine. Codes 0 a 3 : rapports produits ; 1/2 : constats a lire.
+echo Operation terminee. Codes 0 a 3 : rapports produits ; 1/2 : constats a lire.
 echo HTML : lecture. TXT : ticket support. JSON : comparaison.
-echo Dossier : %OUT%
+echo Dossier : "%OUT%"
+goto FINISH
 
-:FINISH
+:ACTION_FAILED
 echo.
-pause
-popd
-endlocal & exit /b %RC%
+echo Action refusee ou incomplete. Code : %RC%. Lisez le message ci-dessus.
+echo En cas de doute, ne supprimez rien manuellement et utilisez le manifeste.
+goto FINISH
+
+:USAGE
+echo.
+echo Usage :
+echo   Diagnostiquer_ArcGIS_Pro.bat [dossier_rapports]
+echo   Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes
+echo   Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "projet.aprx" [views^|views_history^|repack^|none]
+echo   Diagnostiquer_ArcGIS_Pro.bat --quarantine-addin "package.esriAddinX" [--confirm-machine-wide]
+echo   Diagnostiquer_ArcGIS_Pro.bat --restore-addin "quarantine.json"
+echo.
+echo Sans argument : diagnostic en lecture seule. La quarantaine n'efface pas les donnees.
+if defined SHOW_HELP (set "RC=0") else (set "RC=64")
+goto FINISH
 
 :MISSING_FILES
 echo.
@@ -79,7 +194,13 @@ goto FINISH
 :NO_PYTHON
 echo.
 echo Python 3.9+ est introuvable. Le Python d'ArcGIS Pro est recherche dans :
-echo %ProgramFiles%\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe
+echo "%ProgramFiles%\ArcGIS\Pro\bin\Python\envs\arcgispro-py3\python.exe"
 echo Installez ou reparez Python/ArcGIS Pro, puis relancez ce fichier.
 set "RC=64"
 goto FINISH
+
+:FINISH
+echo.
+pause
+popd
+endlocal & exit /b %RC%
