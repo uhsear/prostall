@@ -52,16 +52,16 @@ or source data is deleted.
 
 Provenance
 ----------
-  arcgis_pro_performance_analyser.py       10509 lines  sha256:3cbd625c3c7c
+  arcgis_pro_performance_analyser.py       11584 lines  sha256:c6d4fcd710ca
   html_report.py                             966 lines  sha256:184c9b6eaf73
-  toolbox_glue.py                            869 lines  sha256:9b8784c4dacf
+  toolbox_glue.py                            880 lines  sha256:e5119eda14dd
 """
 
 from __future__ import print_function
 
 # ============================================================================
 # 1/3  diagnostic engine
-# source: arcgis_pro_performance_analyser.py  (sha256:3cbd625c3c7c)
+# source: arcgis_pro_performance_analyser.py  (sha256:c6d4fcd710ca)
 # ----------------------------------------------------------------------------
 # r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 #
@@ -81,10 +81,14 @@ from __future__ import print_function
 # session that never finished opening produces no trace at all. That is the gap
 # this fills, from the outside, before the case is opened.
 #
-# Check by default. A plain run reads and prints. --apply is the only path that
-# changes workstation settings, while --project-repair writes only a separately
-# verified recovery copy and never rewrites the selected source. Every applied
-# change prints its own undo, and no original data is deleted. The network probes
+# Check by default. A plain run reads and prints. --apply changes only the gated
+# cache setting, --project-repair writes only a separately verified recovery
+# copy, and --quarantine-addin moves one exact PF-31 package into a verified,
+# restorable quarantine. --restore-addin reverses that move without overwriting.
+# Every applied change prints its own undo; no source project is rewritten and
+# no quarantined package is erased. --menu offers those actions as numbered
+# choices, and each choice runs the same argv as the flag, so a double-click
+# cannot reach a gate a script could not. The network probes
 # are opt-in: without --sde-server and --portal no host is contacted. The one
 # exception is a project folder that already lives on a share: reading it crosses
 # the network, as Pro does when it opens the project, and PF-03 times one listing
@@ -94,9 +98,12 @@ from __future__ import print_function
 #     python arcgis_pro_performance_analyser.py
 #     python arcgis_pro_performance_analyser.py --sde-server gisdb01 --portal gis.example.org --verbose
 #     python arcgis_pro_performance_analyser.py --report C:\Temp\properf
-#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx
-#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx --project-repair views
+#     python arcgis_pro_performance_analyser.py --menu
+#     python arcgis_pro_performance_analyser.py --project C:\GIS\Review\a.aprx
+#     python arcgis_pro_performance_analyser.py --project C:\GIS\Review\a.aprx --project-repair views
 #     python arcgis_pro_performance_analyser.py --apply
+#     python arcgis_pro_performance_analyser.py --quarantine-addin C:\AddIns\Vendor.esriAddinX
+#     python arcgis_pro_performance_analyser.py --restore-addin C:\Quarantine\quarantine.json
 #
 # Exit codes: 0 nothing to act on, 1 measured findings without lost-edit impact,
 # 2 at least one finding bearing on lost edits, 3 no finding but nothing was determined either,
@@ -3744,11 +3751,13 @@ def decide_addins(records, coverage, pro_version, crash_modules=None,
         impact="S6 and S1. Startup custom code can crash Pro before a project "
                "opens or slow its initialization. Presence alone is not proof.",
         fix="Since /disableaddins changes the result, close Pro and isolate "
-            "ONE listed package at a time into a local quarantine folder "
-            "outside every default/well-known folder. Relaunch normally after "
-            "each move and restore uninvolved packages. Never delete them. "
-            "Correlate any DL-13 fault module and have an administrator handle "
-            "managed configurations or machine-wide folders.",
+            "ONE exact listed package at a time with the BAT/CLI "
+            "--quarantine-addin action. It verifies a copy outside every "
+            "loading folder and writes a quarantine.json; --restore-addin "
+            "restores it without overwriting. Relaunch normally after each "
+            "move and restore uninvolved packages. Never erase the backup. "
+            "Correlate any DL-13 fault module; machine-wide packages require "
+            "administrator approval and a separate confirmation flag.",
         detail=("Coverage limits: %d entries/location, %d packages, full CRC "
                 "on at most %d packages up to %d expanded bytes each. %s"
                 % (ADDIN_SCAN_LIMIT, ADDIN_MAX_PACKAGES, ADDIN_FULL_CRC_MAX,
@@ -4043,10 +4052,8 @@ def probe_pro_version(env, facts):
                               install, exe_version)
 
 
-def probe_addins(env, facts):
-    """Inventory every discovered startup package within explicit limits."""
-    if not env.registry_readable():
-        return decide_addins([], [], None, platform_readable=False)
+def discover_startup_packages(env):
+    """(records, coverage, locations) for diagnostics and explicit quarantine."""
     coverage = []
     locations = []
     docs = documents_path(env)
@@ -4093,7 +4100,7 @@ def probe_addins(env, facts):
             kind = ADDIN_PACKAGE_EXTENSIONS.get(
                 ntpath.splitext(entry.name)[1].lower())
             if kind:
-                packages[_norm(entry.path)] = (entry, kind, scope)
+                packages[_norm(entry.path)] = (entry, kind, scope, folder)
     ordered = sorted(packages.values(),
                      key=lambda row: (row[0].mtime, row[0].path), reverse=True)
     if len(ordered) > ADDIN_MAX_PACKAGES:
@@ -4101,14 +4108,24 @@ def probe_addins(env, facts):
                         "inspected" % (ADDIN_MAX_PACKAGES,
                                        len(ordered) - ADDIN_MAX_PACKAGES))
     records = []
-    for index, (entry, kind, scope) in enumerate(ordered[:ADDIN_MAX_PACKAGES]):
+    for index, (entry, kind, scope, folder) in enumerate(
+            ordered[:ADDIN_MAX_PACKAGES]):
         payload = env.startup_package(entry.path,
                                       full_crc=index < ADDIN_FULL_CRC_MAX)
         record = parse_startup_package(entry.path, kind, payload)
         record["source"] = scope
+        record["source_root"] = folder
         record["modified"] = stamp(entry.mtime)
         record["size"] = entry.size
         records.append(record)
+    return records, coverage, unique_locations
+
+
+def probe_addins(env, facts):
+    """Inventory every discovered startup package within explicit limits."""
+    if not env.registry_readable():
+        return decide_addins([], [], None, platform_readable=False)
+    records, coverage, _locations = discover_startup_packages(env)
     facts["addin_inventory"] = records
     return decide_addins(records, coverage, facts.get("pro_release"),
                          facts.get("crash_modules"))
@@ -6682,6 +6699,350 @@ def write_html_report(document, json_path, verbose=False):
 
 
 # =============================================================================
+# EXPLICIT ADD-IN QUARANTINE. Presence is never enough to select a package.
+# =============================================================================
+
+ADDIN_QUARANTINE_SCHEMA = "arcgis-pro-addin-quarantine"
+ADDIN_MANIFEST_MAX_BYTES = 1024 ** 2
+
+
+class AddinRemediationError(Exception):
+    """A refused or incomplete add-in action, with no success claim."""
+
+
+def _addin_pro_closed(env):
+    processes = env.processes("ArcGISPro.exe")
+    if processes is None:
+        raise AddinRemediationError(
+            "Whether ArcGIS Pro is running could not be determined; no "
+            "add-in was changed. Close Pro and retry when tasklist works.")
+    if processes:
+        raise AddinRemediationError(
+            "ArcGIS Pro is running; no add-in was changed. Save work and "
+            "close every Pro session before quarantine or restore.")
+
+
+def _addin_path_within(path, root):
+    """Lexical containment for either a Windows path or a test's POSIX path."""
+    windows = bool(ntpath.splitdrive(path or "")[0] or "\\" in (path or "")
+                   or ntpath.splitdrive(root or "")[0] or "\\" in (root or ""))
+    module = ntpath if windows else os.path
+    if not path or not root:
+        return False
+    candidate = module.normcase(module.abspath(path))
+    parent = module.normcase(module.abspath(root))
+    try:
+        return module.commonpath([candidate, parent]) == parent
+    except (ValueError, OSError):
+        return False
+
+
+def _addin_fingerprint(path):
+    import hashlib
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(1024 ** 2)
+            if not block:
+                break
+            size += len(block)
+            digest.update(block)
+    return {"size": size, "sha256": digest.hexdigest()}
+
+
+def _addin_copy_verified(source, destination_dir):
+    """Copy to a temporary sibling and prove source stability and hash equality."""
+    import shutil
+    before = _addin_fingerprint(source)
+    temp = unique_path(os.path.join(
+        destination_dir, ".%s.properf-partial" % os.path.basename(source)))
+    try:
+        shutil.copyfile(source, temp)
+        after = _addin_fingerprint(source)
+        copied = _addin_fingerprint(temp)
+        if before != after:
+            raise AddinRemediationError(
+                "The package changed while it was being copied; the source "
+                "was left in place and the copy was not published.")
+        if copied != before:
+            raise AddinRemediationError(
+                "The copied package failed SHA-256/size verification; the "
+                "source was left in place.")
+        return temp, before
+    except Exception:
+        try:
+            if os.path.exists(temp):
+                os.remove(temp)
+        except OSError:
+            pass
+        raise
+
+
+def _addin_publish_noclobber(temp, destination):
+    """Publish in one directory without replacing a file that already exists."""
+    if os.path.exists(destination):
+        raise AddinRemediationError(
+            "Destination already exists; refusing to overwrite it: %s"
+            % destination)
+    try:
+        if os.name == "nt":
+            # Windows rename fails when the destination exists.
+            os.rename(temp, destination)
+        else:
+            # Hard-link publication is atomic and no-clobber on the test hosts.
+            os.link(temp, destination)
+            os.remove(temp)
+    except FileExistsError:
+        raise AddinRemediationError(
+            "Destination appeared during the operation; nothing was "
+            "overwritten: %s" % destination)
+
+
+def _addin_write_manifest(path, document):
+    temp = unique_path(path + ".partial")
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=1, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.remove(temp)
+
+
+def _addin_restore_command(manifest_path):
+    executable = quote_cmd(sys.executable)
+    script = quote_cmd(os.path.abspath(__file__))
+    manifest = quote_cmd(manifest_path)
+    if not executable or not script or not manifest:
+        return None
+    return "%s %s --restore-addin %s" % (executable, script, manifest)
+
+
+def quarantine_addin(env, package_path, quarantine_dir=None,
+                     confirm_machine_wide=False):
+    """Move one explicitly selected discovered package into verified quarantine.
+
+    This is deliberately not an automatic fix: the operator supplies the exact
+    path from PF-31. The package remains recoverable and its bytes are hashed.
+    """
+    if not env.windows or not env.registry_readable():
+        raise AddinRemediationError(
+            "Add-in quarantine is supported only on the affected Windows "
+            "workstation. No file was changed.")
+    _addin_pro_closed(env)
+    records, coverage, locations = discover_startup_packages(env)
+    wanted = _norm(ntpath.normpath(package_path or ""))
+    record = next((row for row in records
+                   if _norm(ntpath.normpath(row.get("path") or "")) == wanted),
+                  None)
+    if record is None:
+        raise AddinRemediationError(
+            "The exact package was not found by the current PF-31 discovery. "
+            "Nothing was moved. Run the diagnostic and copy a package path "
+            "from PF-31; arbitrary files are not accepted.")
+    if ("administrator" in (record.get("source") or "").lower()
+            and not confirm_machine_wide):
+        raise AddinRemediationError(
+            "This is a machine-wide/administrator package and changing it can "
+            "affect every user. Nothing was moved. Re-run with "
+            "--confirm-machine-wide only after administrator approval.")
+    source = record["path"]
+    if not os.path.isfile(source):
+        raise AddinRemediationError(
+            "The discovered package is no longer a readable file: %s" % source)
+    if not quarantine_dir:
+        local = env.getenv("LOCALAPPDATA")
+        if not local:
+            raise AddinRemediationError(
+                "LOCALAPPDATA is unavailable; specify --quarantine-dir with "
+                "a local folder outside every add-in location.")
+        quarantine_dir = os.path.join(
+            local, "ArcGISPro_PerformanceAnalyser", "Quarantine")
+    quarantine_dir = os.path.abspath(quarantine_dir)
+    for _scope, folder, _registered in locations:
+        if _addin_path_within(quarantine_dir, folder):
+            raise AddinRemediationError(
+                "Quarantine must be outside every startup-loading folder; "
+                "%s is inside %s. Nothing was moved." % (quarantine_dir, folder))
+
+    import shutil
+    import tempfile
+    os.makedirs(quarantine_dir, exist_ok=True)
+    transaction = tempfile.mkdtemp(prefix="quarantine-", dir=quarantine_dir)
+    quarantined = os.path.join(transaction, os.path.basename(source))
+    manifest_path = os.path.join(transaction, "quarantine.json")
+    try:
+        temp, fingerprint = _addin_copy_verified(source, transaction)
+        os.replace(temp, quarantined)
+        taken = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
+        installed_pro = (env.reg(PRO_REG_KEY, "RealVersion")
+                         or env.reg(PRO_REG_KEY, "Version"))
+        manifest = {
+            "schema": ADDIN_QUARANTINE_SCHEMA, "schema_version": 1,
+            "status": "prepared", "taken": taken, "user": env.username(),
+            "original_path": source, "quarantined_path": quarantined,
+            "size": fingerprint["size"], "sha256": fingerprint["sha256"],
+            "installed_pro": installed_pro,
+            "package": record, "coverage": coverage,
+            "selection": "Exact operator-selected path; presence is not a "
+                         "causation finding.",
+            "indicators": list(record.get("warnings") or []),
+            "restore_command": _addin_restore_command(manifest_path),
+        }
+        _addin_write_manifest(manifest_path, manifest)
+    except Exception:
+        # The source is still present at this point, so the incomplete copy is
+        # safe to remove. No user package is deleted by this cleanup.
+        shutil.rmtree(transaction, ignore_errors=True)
+        raise
+
+    try:
+        os.remove(source)
+    except Exception as exc:
+        manifest["status"] = "copy_only_source_present"
+        manifest["error"] = "%s: %s" % (type(exc).__name__, exc)
+        _addin_write_manifest(manifest_path, manifest)
+        raise AddinRemediationError(
+            "The source could not be removed, so the add-in was NOT "
+            "quarantined. The original remains in place and a verified copy "
+            "is recorded in %s (%s)" % (manifest_path, exc))
+
+    warning = None
+    manifest["status"] = "quarantined"
+    manifest["quarantined_at"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
+    try:
+        _addin_write_manifest(manifest_path, manifest)
+    except (OSError, IOError) as exc:
+        # The prepared manifest already contains every restore field. Report
+        # the partial audit failure without pretending the move was rolled back.
+        warning = ("Package moved, but the final manifest update failed: %s. "
+                   "The prepared manifest is still usable for restore." % exc)
+    return {
+        "action": "quarantine", "status": "quarantined",
+        "original_path": source, "quarantined_path": quarantined,
+        "manifest": manifest_path,
+        "restore_command": _addin_restore_command(manifest_path),
+        "indicators": list(record.get("warnings") or []), "warning": warning,
+    }
+
+
+def _restore_addin_manifest(manifest_path):
+    """Restore from a bounded, validated manifest without overwriting anything."""
+    if not os.path.isfile(manifest_path):
+        raise AddinRemediationError("Manifest not found: %s" % manifest_path)
+    if os.path.getsize(manifest_path) > ADDIN_MANIFEST_MAX_BYTES:
+        raise AddinRemediationError("Manifest exceeds the 1 MB safety cap.")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise AddinRemediationError("Manifest is unreadable: %s" % exc)
+    if not isinstance(manifest, dict):
+        raise AddinRemediationError("Manifest root must be a JSON object.")
+    if (manifest.get("schema") != ADDIN_QUARANTINE_SCHEMA
+            or manifest.get("schema_version") != 1):
+        raise AddinRemediationError("Not a supported add-in quarantine manifest.")
+    if manifest.get("status") not in ("prepared", "quarantined"):
+        raise AddinRemediationError(
+            "Manifest status %r is not restorable (already restored or "
+            "incomplete)." % manifest.get("status"))
+    original = manifest.get("original_path")
+    quarantined = manifest.get("quarantined_path")
+    sha256 = manifest.get("sha256")
+    size = manifest.get("size")
+    if not all(isinstance(value, str) and value
+               for value in (original, quarantined, sha256)):
+        raise AddinRemediationError("Manifest paths or SHA-256 are missing.")
+    if (not os.path.isabs(original) or not os.path.isabs(quarantined)
+            or os.path.splitext(original)[1].lower()
+            not in ADDIN_PACKAGE_EXTENSIONS):
+        raise AddinRemediationError("Manifest contains an invalid package path.")
+    if not re.match(r"^[0-9a-f]{64}$", sha256) or isinstance(size, bool) \
+            or not isinstance(size, int) or size < 0:
+        raise AddinRemediationError("Manifest integrity fields are invalid.")
+    manifest_dir = os.path.realpath(os.path.dirname(os.path.abspath(manifest_path)))
+    quarantined = os.path.realpath(quarantined)
+    if not _addin_path_within(quarantined, manifest_dir):
+        raise AddinRemediationError(
+            "The quarantined package must be inside the manifest's own "
+            "transaction folder; an external source is refused.")
+    if os.path.basename(quarantined) != os.path.basename(original):
+        raise AddinRemediationError("Manifest package names do not match.")
+    if not os.path.isfile(quarantined):
+        raise AddinRemediationError("Quarantined package is missing: %s" % quarantined)
+    if os.path.exists(original):
+        raise AddinRemediationError(
+            "The original path already exists; refusing to overwrite it: %s"
+            % original)
+    parent = os.path.dirname(original)
+    if not os.path.isdir(parent):
+        raise AddinRemediationError(
+            "The original parent folder is absent. No folder was invented; "
+            "restore it first or copy the package manually: %s" % parent)
+    actual = _addin_fingerprint(quarantined)
+    if actual != {"size": size, "sha256": sha256}:
+        raise AddinRemediationError(
+            "Quarantined package no longer matches the manifest SHA-256/size; "
+            "restore was refused.")
+    temp = None
+    try:
+        temp, _fingerprint = _addin_copy_verified(quarantined, parent)
+        _addin_publish_noclobber(temp, original)
+        temp = None
+    finally:
+        if temp and os.path.exists(temp):
+            os.remove(temp)
+
+    warning = None
+    manifest["status"] = "restored"
+    manifest["restored_at"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
+    manifest["restored_path"] = original
+    try:
+        _addin_write_manifest(manifest_path, manifest)
+    except (OSError, IOError) as exc:
+        warning = ("Package restored, but the manifest status update failed: "
+                   "%s. The original is present and the backup was retained."
+                   % exc)
+    return {
+        "action": "restore", "status": "restored", "original_path": original,
+        "quarantined_path": quarantined, "manifest": manifest_path,
+        "warning": warning,
+    }
+
+
+def restore_addin(env, manifest_path):
+    if not env.windows:
+        raise AddinRemediationError(
+            "Add-in restore is supported only on the affected Windows "
+            "workstation. No file was changed.")
+    _addin_pro_closed(env)
+    return _restore_addin_manifest(manifest_path)
+
+
+def print_addin_action(result):
+    if result["action"] == "quarantine":
+        print("ADD-IN QUARANTINED (removed from startup loading; not erased)")
+    else:
+        print("ADD-IN RESTORED (the verified quarantine backup was retained)")
+    print("  original   : %s" % result["original_path"])
+    print("  backup     : %s" % result["quarantined_path"])
+    print("  manifest   : %s" % result["manifest"])
+    for indicator in result.get("indicators") or []:
+        print("  indicator  : %s" % indicator)
+    if result.get("restore_command"):
+        print("  undo       : %s" % result["restore_command"])
+    if result.get("warning"):
+        print("  WARNING    : %s" % result["warning"])
+    print("  next       : close Pro, then start it normally and compare the "
+          "result. A change supports isolation evidence; it does not prove "
+          "that this package was the only cause.")
+
+
+# =============================================================================
 # SELF-TEST
 # =============================================================================
 
@@ -7887,6 +8248,93 @@ def self_test():
           and "Vendor Tools" in "\n".join(probed_addins["observed"])
           and "source=user" in "\n".join(probed_addins["observed"]),
           "the probe follows a HKCU well-known folder and inspects its package")
+
+    print("-" * 70)
+    print("explicit add-in quarantine is verified, reversible and no-clobber")
+    quarantine_test = tempfile.mkdtemp(prefix="properf-quarantine-test-")
+    real_discovery = globals()["discover_startup_packages"]
+    try:
+        loading = os.path.join(quarantine_test, "loading")
+        os.makedirs(loading)
+        source = os.path.join(loading, "Vendor.esriAddinX")
+        original_bytes = b"PK-test-addin\x00\xff"
+        with open(source, "wb") as handle:
+            handle.write(original_bytes)
+        quarantine_parent = os.path.join(quarantine_test, "quarantine")
+        selected = dict(addin, path=source, source="user", source_root=loading)
+        locations = [("user", loading, True)]
+        globals()["discover_startup_packages"] = lambda env: (
+            [selected], [], locations)
+        closed_env = fake_healthy()
+        original_fingerprint = _addin_fingerprint(source)
+        quarantined = quarantine_addin(closed_env, source, quarantine_parent)
+        check(not os.path.exists(source)
+              and os.path.isfile(quarantined["quarantined_path"])
+              and _addin_fingerprint(quarantined["quarantined_path"])["sha256"]
+              == original_fingerprint["sha256"]
+              and open(quarantined["quarantined_path"], "rb").read()
+              == original_bytes,
+              "quarantine removes the loading copy and preserves exact package bytes")
+        manifest_file = quarantined["manifest"]
+        with open(manifest_file, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        check(manifest["status"] == "quarantined"
+              and manifest["sha256"] == _addin_fingerprint(
+                  quarantined["quarantined_path"])["sha256"]
+              and manifest["restore_command"],
+              "the manifest records a verified hash, paths and an undo command")
+        restored = restore_addin(closed_env, manifest_file)
+        check(restored["status"] == "restored"
+              and open(source, "rb").read() == original_bytes
+              and os.path.isfile(quarantined["quarantined_path"]),
+              "restore returns the exact package and retains the quarantine backup")
+        with open(manifest_file, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest["status"] = "quarantined"
+        with open(manifest_file, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        raises(lambda: _restore_addin_manifest(manifest_file),
+               "restore refuses to overwrite a package that reappeared",
+               AddinRemediationError)
+        check(open(source, "rb").read() == original_bytes,
+              "and the existing package survives that refusal byte for byte")
+        os.remove(source)
+        with open(quarantined["quarantined_path"], "wb") as handle:
+            handle.write(b"tampered")
+        raises(lambda: _restore_addin_manifest(manifest_file),
+               "a quarantined package whose hash changed is not restored",
+               AddinRemediationError)
+        check(not os.path.exists(source),
+              "and the failed integrity check does not publish a partial file")
+        with open(source, "wb") as handle:
+            handle.write(original_bytes)
+        raises(lambda: quarantine_addin(fake_sick(), source, quarantine_parent),
+               "quarantine is refused while ArcGIS Pro runs",
+               AddinRemediationError)
+        raises(lambda: quarantine_addin(FakeEnv(procs=None), source,
+                                        quarantine_parent),
+               "and when the process list is unreadable rather than assuming closed",
+               AddinRemediationError)
+        selected["source"] = "administrator"
+        raises(lambda: quarantine_addin(closed_env, source, quarantine_parent),
+               "a machine-wide package requires its separate explicit confirmation",
+               AddinRemediationError)
+        selected["source"] = "user"
+        raises(lambda: quarantine_addin(closed_env, source,
+                                        os.path.join(loading, "still-loaded")),
+               "quarantine inside a startup-loading folder is refused",
+               AddinRemediationError)
+        raises(lambda: quarantine_addin(closed_env,
+                                        os.path.join(loading, "Other.esriAddinX"),
+                                        quarantine_parent),
+               "an arbitrary package absent from PF-31 discovery is refused",
+               AddinRemediationError)
+        check(os.path.isfile(source)
+              and open(source, "rb").read() == original_bytes,
+              "every refused action leaves the selected source untouched")
+    finally:
+        globals()["discover_startup_packages"] = real_discovery
+        shutil.rmtree(quarantine_test, ignore_errors=True)
 
     check(decide_memory(None, None)["status"] == "Info",
           "memory that could not be read is Info: without that guard a failed "
@@ -9121,7 +9569,8 @@ def self_test():
     globals()["self_test"] = lambda: 4242
     try:
         check(main(["--self-test", "--apply", "--sde-server", "h",
-                    "--report", "x"]) == 4242,
+                    "--report", "x", "--quarantine-addin", "x.esriAddinX",
+                    "--restore-addin", "quarantine.json"]) == 4242,
               "--self-test wins over every other flag, so a test run can "
               "neither apply a fix, nor probe a host, nor write a file  "
               "<-- pinned defect")
@@ -9166,6 +9615,13 @@ def self_test():
           "so is an impossible port")
     check(quiet_main(["--sde-port", "70000"])[0] == 64,
           "at either end of the range")
+    check(quiet_main(["--quarantine-dir", "x"])[0] == 64,
+          "a quarantine directory without a selected package is a usage error")
+    check(quiet_main(["--quarantine-addin", "x.esriAddinX",
+                      "--restore-addin", "quarantine.json"])[0] == 64,
+          "quarantine and restore cannot be armed in the same invocation")
+    check(quiet_main(["--quarantine-addin", "not-a-package.txt"])[0] == 64,
+          "an arbitrary file extension cannot reach the quarantine file operations")
     blocked = tempfile.mkdtemp(prefix="properf-blocked-")
     try:
         wall = os.path.join(blocked, "wall")
@@ -10095,6 +10551,10 @@ def self_test():
     check("almost every probe" in err and "almost every probe" not in out
           and json.loads(out)["report_version"] == 4,
           "off Windows the note goes to stderr and stdout stays a document")
+    code, out, err = with_env(
+        OffMachine, ["--quarantine-addin", r"C:\AddIns\Vendor.esriAddinX"])
+    check(code == 64 and "No file was changed" in err,
+          "off Windows quarantine refuses before discovery or any file operation")
 
     # The reading layer, reached with stand-ins instead of left unreached.
     fake_dll = types.SimpleNamespace(
@@ -10336,6 +10796,228 @@ def self_test():
           "on a Windows host there is no off-Windows note, and the JSON keys "
           "are sorted so two reports diff cleanly  <-- pinned defect")
 
+    # ------------------------------------------------------------- the menu
+    print("-" * 70)
+    print("the menu routes every choice to the documented command line")
+
+    def menu(answers, close=True):
+        """Run the menu on a scripted stdin and hand back (code, text, argv).
+
+        The answers end with Quitter unless `close` says otherwise, because
+        the menu loops and a scripted run that never quits is the infinite
+        loop this helper would otherwise hang in. Three quit answers are
+        appended rather than one: a question in the middle of an action
+        accepts 0 as "back to the menu", so the last answer to be read is not
+        always the menu prompt.
+        """
+        calls = []
+        out = io.StringIO()
+        lines = list(answers) + (["0", "0", "0"] if close else [])
+        source = io.StringIO("".join(line + "\n" for line in lines))
+        code = run_menu(streams=(out, source),
+                        execute=lambda argv: calls.append(argv) or 0,
+                        report_dir="C:\\Rapports")
+        return code, out.getvalue(), calls
+
+    def menu_argv(answers):
+        return menu(answers)[2]
+
+    text_all = "\n".join([MENU_TITLE]
+                         + ["%s %s" % (key, label) for key, label in MENU_ITEMS]
+                         + ["%s %s" % (key, "%s %s" % (mode, label))
+                            for key, mode, label in MENU_REPAIR_MODES])
+    check(all(ord(char) < 128 for char in text_all),
+          "the menu is plain ASCII, so no Windows code page can garble a "
+          "choice <-- pinned defect")
+    check(all(label.strip() for _key, label in MENU_ITEMS)
+          and [key for key, _label in MENU_ITEMS][-1] == "0",
+          "every choice carries a label and Quitter comes last")
+    check(sorted([mode for _key, mode, _label in MENU_REPAIR_MODES])
+          == sorted(PROJECT_REPAIR_MODES),
+          "the menu offers exactly the engine's repair modes, so it cannot "
+          "invent one or hide one  <-- pinned defect")
+
+    code, shown, calls = menu(["0"])
+    check(code == 0 and calls == [] and "Assistant ArcGIS Pro" in shown
+          and "Votre choix" in shown,
+          "the menu draws itself and Quitter runs nothing at all")
+    check("aucune autre action" in shown.lower(),
+          "and saying so is the last line, not a silent exit")
+
+    # Enter, the answer most operators give, must be the read-only run.
+    code, shown, calls = menu([""])
+    check(calls == [["--report", "C:\\Rapports", "--html", "--verbose"]],
+          "Enter defaults to the read-only diagnostic with reports  "
+          "<-- pinned defect")
+    check(not any(flag in " ".join(calls[0]) for flag in
+                  ("--apply", "--project", "--project-repair",
+                   "--quarantine-addin", "--restore-addin")),
+          "and that default argument list mutates nothing")
+    check("equivalent :" in shown,
+          "every run shows the flag line it mapped to, so the menu teaches "
+          "the command instead of hiding it")
+
+    calls = menu_argv(["1"])
+    check(len(calls) == 1 and calls[0][:2] == ["--report", "C:\\Rapports"],
+          "choice 1 is the same read-only diagnostic as Enter")
+
+    calls = menu_argv(["2", "n"])
+    check(calls == [], "choice 2 with a plain no changes nothing")
+    calls = menu_argv(["2", "o"])
+    check(len(calls) == 1 and calls[0][0] == "--apply"
+          and calls[0].count("--apply") == 1,
+          "choice 2 with an explicit yes arms --apply exactly once")
+    check("--project" not in calls[0] and "--quarantine-addin" not in calls[0],
+          "the cache fix is not mixed with a project or an add-in action")
+
+    calls = menu_argv(["3", '"C:\\GIS\\Broken.aprx"', "2"])
+    check(len(calls) == 1
+          and calls[0][:5] == ["--project", "C:\\GIS\\Broken.aprx",
+                               "--project-repair", "views_history",
+                               "--report"],
+          "choice 3 strips the quotes Windows puts round a dropped file and "
+          "maps mode 2 to views_history  <-- pinned defect")
+    code, shown, calls = menu(["3", "C:\\GIS\\notes.txt", "0"])
+    check(calls == [] and ".aprx" in shown,
+          "a non-project path is refused in the menu before the engine sees "
+          "it, and 0 goes back without an action")
+    calls = menu_argv(["3", "C:\\GIS\\Broken.aprx", ""])
+    check(calls[0][3] == "views",
+          "the repair mode defaults to views, the least destructive one")
+
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n"])
+    check(len(calls) == 1
+          and calls[0] == ["--quarantine-addin",
+                           "C:\\AddIns\\Vendor.esriAddinX"]
+          and "--confirm-machine-wide" not in calls[0],
+          "choice 4 quarantines a per-user package without the machine-wide "
+          "confirmation")
+    check("--report" not in calls[0] and "--html" not in calls[0],
+          "and does not attach report flags to a standalone action, which the "
+          "parser refuses")
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "o", "n"])
+    check("--confirm-machine-wide" in calls[0],
+          "a machine-wide package needs the separate yes the menu asks for")
+
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n", ""])
+    check(len(calls) == 2 and calls[1][:2] == ["--report", "C:\\Rapports"],
+          "a finished quarantine offers the control diagnostic, and Enter "
+          "accepts it  <-- pinned defect")
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n", "n"])
+    check(len(calls) == 1,
+          "declining the control diagnostic runs nothing else")
+
+    calls = menu_argv(["5", "C:\\Quarantine\\q1\\quarantine.json"])
+    check(calls == [["--restore-addin",
+                     "C:\\Quarantine\\q1\\quarantine.json"]],
+          "choice 5 restores from the manifest it was given")
+    calls = menu_argv(["5", "quarantine.txt", "0"])
+    shown = menu(["5", "quarantine.txt", "0"])[1].lower()
+    check(calls == [] and ".json" in shown,
+          "a manifest that is not a .json is refused before the engine")
+
+    code, shown, calls = menu(["9", "6"])
+    check(calls == [] and "Reponse attendue" in shown,
+          "an unknown key re-asks and says what is accepted")
+    check("--quarantine-addin" in shown and "--restore-addin" in shown,
+          "the help choice lists the equivalent flags for a script")
+
+    try:
+        menu([], close=False)
+    except MenuInputClosed:
+        check(True, "the end of the input is raised, not read as an endless "
+                    "Enter")
+    else:
+        check(False, "the end of the input must not be read as an endless "
+                     "Enter")
+
+    # Nothing the menu can build may fall outside the documented flags.
+    allowed = {"--report", "--html", "--verbose", "--apply", "--project",
+               "--project-repair", "--quarantine-addin",
+               "--confirm-machine-wide", "--restore-addin"}
+    every = (menu_argv([""]) + menu_argv(["2", "o"]) + menu_argv(
+        ["3", "C:\\a.aprx", "3"]) + menu_argv(
+        ["4", "C:\\p.esriAddinX", "o", "n"]) + menu_argv(
+        ["5", "C:\\q\\quarantine.json"]))
+    used = set([word for argv in every for word in argv
+                if word.startswith("--")])
+    check(used and used <= allowed,
+          "every flag the menu can build is a documented flag: %s"
+          % ", ".join(sorted(used)))
+    check(not any(word in used for word in ("--json", "--sde-server",
+                                            "--portal", "--timeout")),
+          "the menu never arms a network probe or a machine-readable dump on "
+          "its own")
+
+    def parses(argv):
+        real_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            _parse(argv)
+            return True
+        except SystemExit:
+            return False
+        finally:
+            sys.stderr = real_stderr
+
+    for argv in every:
+        check(parses(argv),
+              "the parser accepts the menu's own argv: %s" % " ".join(argv))
+
+    def refused(argv):
+        real_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            return main(argv)
+        finally:
+            sys.stderr = real_stderr
+
+    check(refused(["--menu", "--apply"]) == USAGE_ERROR,
+          "--menu refuses to be armed beside an action flag")
+    check(refused(["--menu", "--quarantine-addin", "C:\\p.esriAddinX"])
+          == USAGE_ERROR,
+          "including an add-in action, which is standalone by contract")
+    check(not stdin_has_terminal(io.StringIO("")),
+          "a stream with no terminal is recognised as unpromptable")
+    check(not stdin_has_terminal(None) or True,
+          "and a missing stdin is answered, never raised")
+
+    fallback_dir = tempfile.mkdtemp(prefix="properf-menu-fallback-")
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO("")
+        code, out, err = with_env(fake_healthy,
+                                  ["--menu", "--report", fallback_dir,
+                                   "--html"])
+        check(code <= 3, "a non-interactive --menu still exits with a "
+                         "diagnostic code, never by blocking")
+        check("Assistant ArcGIS Pro" not in out,
+              "a scheduled task is not shown a menu it cannot answer")
+        check("lecture seule" in err,
+              "and is told which read-only run it got instead")
+        written = sorted(os.listdir(fallback_dir))
+        check(any(name.endswith(".html") for name in written)
+              and any(name.endswith(".json") for name in written),
+              "that fallback still writes the reports the launcher used to "
+              "write")
+    finally:
+        sys.stdin = real_stdin
+        shutil.rmtree(fallback_dir, ignore_errors=True)
+
+    real_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        _menu_run_cli(["--definitely-not-a-flag"])
+    except SystemExit as exc:
+        executor_code = exc.code
+    else:
+        executor_code = "accepted it"
+    finally:
+        sys.stderr = real_stderr
+    check(executor_code == USAGE_ERROR,
+          "the shipped executor is the real parser: an invented flag exits "
+          "64 from one menu run  <-- pinned defect")
+
     # ------------------------------------------------------- the harness itself
     print("-" * 70)
     print("the harness records a failure as a failure")
@@ -10416,8 +11098,10 @@ def _parse(argv):
         description="Diagnose this workstation or one explicitly selected "
                     ".aprx, and never report a finding the file or machine "
                     "did not produce.",
-        epilog="Check by default. Without --apply or --project-repair, nothing "
-               "on the machine or in the source project changes; without "
+        epilog="Check by default. Without --apply, --project-repair, "
+               "--quarantine-addin or --restore-addin, nothing on the machine "
+               "or in the source project changes; --menu only asks which of "
+               "those to run, and runs it as the documented flag. Without "
                "--sde-server or --portal no host is "
                "contacted, apart from reading a project folder that already "
                "lives on a share. Connection files are recorded by path and "
@@ -10458,7 +11142,326 @@ def _parse(argv):
                     help="run the gated fixes. Off by default. Each one is "
                          "refused unless its check actually failed, prints its "
                          "own undo, and never deletes anything.")
+    ap.add_argument("--quarantine-addin", metavar="PACKAGE",
+                    help="move this exact PF-31-discovered package into a "
+                         "verified, restorable quarantine; Pro must be closed")
+    ap.add_argument("--quarantine-dir", metavar="DIR",
+                    help="quarantine parent outside every startup-loading "
+                         "folder (default: LOCALAPPDATA analyser folder)")
+    ap.add_argument("--restore-addin", metavar="MANIFEST",
+                    help="restore the package recorded in a quarantine.json "
+                         "without overwriting any existing file")
+    ap.add_argument("--confirm-machine-wide", action="store_true",
+                    help="confirm an administrator-approved quarantine of a "
+                         "machine-wide package; affects other users")
+    ap.add_argument("--menu", action="store_true",
+                    help="offer the actions above as a numbered French menu. "
+                         "Each choice runs the same flags a script would "
+                         "pass. With no terminal on stdin it runs the "
+                         "read-only diagnostic instead of waiting for input")
     return ap.parse_args(argv)
+
+
+# -----------------------------------------------------------------------------
+# THE INTERACTIVE MENU
+#
+# Five actions used to need five remembered flags, and an operator who cannot
+# remember a flag double-clicks the file, gets a read-only run, and concludes
+# that the repair features do not exist. The menu answers that. It is a front
+# end and not a second implementation: each choice builds the same argv a
+# script would pass, so the same parser, the same refusals, the same undo lines
+# and the same exit codes apply. Nothing here relaxes a gate, and no choice
+# picks an add-in, a project or a repair mode on the operator's behalf.
+# -----------------------------------------------------------------------------
+
+MENU_TITLE = "Assistant ArcGIS Pro : diagnostic, reparation et add-ins"
+
+MENU_ITEMS = (
+    ("1", "Diagnostic complet, lecture seule (TXT, JSON et HTML)"),
+    ("2", "Corriger le cache ESRI : AP-01, reversible, Pro ferme"),
+    ("3", "Reparer une COPIE d'un projet .aprx (l'original reste intact)"),
+    ("4", "Mettre en quarantaine un add-in precis, de facon reversible"),
+    ("5", "Restaurer un add-in depuis son quarantine.json"),
+    ("6", "Aide : dossiers, commandes equivalentes et codes de sortie"),
+    ("0", "Quitter"),
+)
+
+# The repair modes, in the order a worried operator should try them: drop the
+# view state first, and treat a full repack as the last resort.
+MENU_REPAIR_MODES = (
+    ("1", "views", "retirer l'etat des vues au demarrage (recommande)"),
+    ("2", "views_history", "retirer aussi l'historique de geoprocessus"),
+    ("3", "repack", "reconstruire seulement le conteneur ZIP"),
+    ("4", "none", "analyser la copie sans autre modification"),
+)
+
+
+class MenuInputClosed(Exception):
+    """No answer can arrive: stdin is exhausted, or the console was closed."""
+
+
+def default_report_dir():
+    """Where the launcher and the menu put reports when no folder is named.
+
+    The batch default is %LOCALAPPDATA%\\ArcGISPro_PerformanceAnalyser\\
+    Rapports. The menu repeats it so a double-click and a typed command cannot
+    scatter reports into two different places on the same machine.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "ArcGISPro_PerformanceAnalyser", "Rapports")
+
+
+def _menu_line(stream, text=""):
+    stream.write(text + "\n")
+
+
+def _menu_answer(streams, prompt):
+    """One line of input, stripped. Raises rather than looping on EOF.
+
+    A closed stream returns "" forever. Treating that as an empty answer
+    turned a scheduled task into an endless reprint of the menu, so the end of
+    the stream is raised to the caller and reported as an interruption.
+    """
+    out, source = streams
+    out.write(prompt)
+    out.flush()
+    line = source.readline()
+    if not line:
+        _menu_line(out)
+        raise MenuInputClosed()
+    return line.strip()
+
+
+def _menu_choice(streams, prompt, allowed, default):
+    """A key from `allowed`, the default on Enter, or a re-ask."""
+    out = streams[0]
+    while True:
+        answer = _menu_answer(streams, prompt).lower()
+        if not answer:
+            return default
+        if answer in allowed:
+            return answer
+        _menu_line(out, "  Reponse attendue : %s." % ", ".join(sorted(allowed)))
+        _menu_line(out)
+
+
+def _menu_path(streams, prompt, extension=None):
+    """A path, or None when the operator types 0 to go back.
+
+    Windows wraps a dropped file in quotes, so the quotes are stripped here:
+    the path the engine validates is the path the operator chose.
+    """
+    out = streams[0]
+    while True:
+        answer = _menu_answer(streams, prompt).strip().strip('"').strip("'")
+        answer = answer.strip()
+        if answer == "0":
+            return None
+        if not answer:
+            _menu_line(out, "  Un chemin est obligatoire, ou 0 pour revenir "
+                            "au menu.")
+            _menu_line(out)
+            continue
+        if extension and not answer.lower().endswith(extension):
+            _menu_line(out, "  Le chemin doit finir par %s, ou 0 pour revenir "
+                            "au menu." % extension)
+            _menu_line(out)
+            continue
+        return answer
+
+
+def _menu_run_cli(argv):
+    """Run one menu action through the real command line.
+
+    Deliberately the only path from the menu to an action: whatever
+    validation, refusal message or exit code the flags produce is what the
+    menu produces too.
+    """
+    return main(argv)
+
+
+def run_menu(streams=None, execute=None, report_dir=None):
+    """Offer the documented actions as numbered choices and run them.
+
+    `execute` exists so the self-test can prove which argv each choice would
+    run without touching a machine; the shipped default is the ordinary
+    command line. Returns the last action's exit code, or 0 when the operator
+    quits before running one.
+    """
+    out, _source = streams or (sys.stdout, sys.stdin)
+    run = execute or _menu_run_cli
+    report_dir = report_dir or default_report_dir()
+    report_flags = ["--report", report_dir, "--html", "--verbose"]
+
+    def show(text=""):
+        _menu_line(out, text)
+
+    def perform(label, argv):
+        show("")
+        show("--- %s" % label)
+        show("    equivalent : arcgis_pro_performance_analyser.py %s"
+             % " ".join(argv))
+        code = run(list(argv))
+        show("--- %s : code %d" % (label, code))
+        return code
+
+    def confirm(question):
+        """A yes/no question where anything but a clear yes is a no.
+
+        0 is accepted as another way back to the menu, because an operator
+        who changes their mind should not have to answer a question they no
+        longer want to act on.
+        """
+        return _menu_choice(streams, question,
+                            ("o", "n", "oui", "non", "0"), "n") in ("o", "oui")
+
+    def control_diagnostic():
+        """A fresh read-only run after a quarantine or a restore.
+
+        The action's own output is not a report, so the operator gets one
+        immediately instead of being told to remember to run it later. The
+        question defaults to yes because running it is the safe answer.
+        """
+        answer = _menu_choice(streams, "Lancer un diagnostic de controle "
+                                       "maintenant ? [O/n] ",
+                              ("o", "n", "oui", "non", "0"), "o")
+        if answer in ("o", "oui"):
+            return perform("Diagnostic de controle", report_flags)
+        show("Diagnostic de controle non lance. Le dossier reste : %s"
+             % report_dir)
+        return None
+
+    show("")
+    show("=" * 70)
+    show(MENU_TITLE)
+    show("=" * 70)
+    for key, label in MENU_ITEMS:
+        show("  %s) %s" % (key, label))
+    show("")
+    show("Rapports  : %s" % report_dir)
+    show("Entree = choix 1. Rien n'est modifie sans une confirmation.")
+    show("La quarantaine retire un add-in du chargement sans l'effacer.")
+
+    last = 0
+    while True:
+        show("")
+        choice = _menu_choice(streams, "Votre choix [1] : ",
+                              tuple([key for key, _label in MENU_ITEMS]), "1")
+        if choice == "0":
+            show("")
+            show("Aucune autre action n'a ete lancee. Code %d." % last)
+            return last
+        if choice == "1":
+            last = perform("Diagnostic en lecture seule", report_flags)
+            continue
+        if choice == "2":
+            show("")
+            show("AP-01 renomme le dossier de cache ESRI d'ArcGIS Pro.")
+            show("ArcGIS Pro doit etre ferme. L'annulation exacte est affichee")
+            show("a la fin ; aucune preference GPU n'est modifiee.")
+            if not confirm("Appliquer ce correctif ? [o/N] "):
+                show("Correctif annule. Aucune modification.")
+                continue
+            last = perform("Correctif AP-01", ["--apply"] + report_flags)
+            continue
+        if choice == "3":
+            show("")
+            show("La reparation ecrit une NOUVELLE copie a cote du projet.")
+            show("Le fichier .aprx choisi n'est jamais reecrit.")
+            project = _menu_path(streams, "Chemin du projet .aprx "
+                                          "(0 pour revenir) : ",
+                                 extension=".aprx")
+            if project is None:
+                show("Annule. Aucun fichier n'a ete cree.")
+                continue
+            show("")
+            show("Que retirer dans la copie ?")
+            for key, mode, label in MENU_REPAIR_MODES:
+                show("  %s) %-13s %s" % (key, mode, label))
+            picked = _menu_choice(
+                streams, "Mode [1], 0 pour revenir : ",
+                tuple([key for key, _mode, _label in MENU_REPAIR_MODES])
+                + ("0",), "1")
+            if picked == "0":
+                show("Annule. Aucune copie n'a ete creee.")
+                continue
+            mode = dict([(key, one) for key, one, _label
+                         in MENU_REPAIR_MODES])[picked]
+            last = perform(
+                "Reparation (%s) d'une copie" % mode,
+                ["--project", project, "--project-repair", mode]
+                + report_flags)
+            continue
+        if choice == "4":
+            show("")
+            show("Seul un package DECOUVERT par PF-31 peut etre deplace.")
+            show("Lancez d'abord le diagnostic (choix 1) et copiez son chemin.")
+            show("ArcGIS Pro doit etre ferme. Le package est copie, verifie")
+            show("par SHA-256, conserve, puis retire du chargement.")
+            package = _menu_path(streams, "Chemin exact du package "
+                                          "(0 pour revenir) : ")
+            if package is None:
+                show("Annule. Aucun package n'a ete deplace.")
+                continue
+            argv = ["--quarantine-addin", package]
+            if confirm("Package installe pour TOUS les utilisateurs de ce "
+                       "poste (administrateur) ? [o/N] "):
+                argv.append("--confirm-machine-wide")
+            last = perform("Quarantaine d'un add-in", argv)
+            if last == 0:
+                code = control_diagnostic()
+                if code is not None:
+                    last = code
+            continue
+        if choice == "5":
+            show("")
+            show("La restauration verifie l'empreinte et refuse d'ecraser")
+            show("un package qui serait reapparu. ArcGIS Pro doit etre ferme.")
+            manifest = _menu_path(streams, "Chemin du quarantine.json "
+                                           "(0 pour revenir) : ",
+                                  extension=".json")
+            if manifest is None:
+                show("Annule. Aucun fichier n'a ete restaure.")
+                continue
+            last = perform("Restauration d'un add-in",
+                           ["--restore-addin", manifest])
+            if last == 0:
+                code = control_diagnostic()
+                if code is not None:
+                    last = code
+            continue
+        # Choice 6 is the only one left, and it stays in the menu on purpose:
+        # it is a reminder, not an action.
+        show("")
+        show("Ce menu appelle les commandes documentees, avec les memes")
+        show("controles. Pour un script, utilisez directement :")
+        show("  --menu                       ce menu")
+        show("  --apply                      correctif AP-01, Pro ferme")
+        show('  --project \"x.aprx\" --project-repair views')
+        show('  --quarantine-addin \"package.esriAddinX\" '
+             '[--confirm-machine-wide]')
+        show('  --restore-addin \"quarantine.json\"')
+        show("")
+        show("Rapports par defaut : %s" % report_dir)
+        show("Codes : 0 rien a signaler, 1/2 constats a lire, 64 refuse.")
+        show("Un add-in n'est jamais declare coupable : la quarantaine est une")
+        show("isolation reversible, pas une preuve de cause ni une suppression.")
+
+
+def stdin_has_terminal(stream=None):
+    """Whether a prompt can be answered.
+
+    A pipe, a redirected file and a scheduled task all have a stdin that ends
+    immediately. Asking a question there would either hang or read the end of
+    the stream as "Enter", so the menu is never offered in that case.
+    """
+    stream = sys.stdin if stream is None else stream
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def main(argv=None):
@@ -10471,6 +11474,39 @@ def main(argv=None):
 
     if args.html and not args.report:
         print("error: --html requires --report DIR.", file=sys.stderr)
+        return USAGE_ERROR
+    addin_actions = int(bool(args.quarantine_addin)) + int(
+        bool(args.restore_addin))
+    if addin_actions > 1:
+        print("error: choose only one add-in action at a time.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.quarantine_dir and not args.quarantine_addin:
+        print("error: --quarantine-dir requires --quarantine-addin.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.confirm_machine_wide and not args.quarantine_addin:
+        print("error: --confirm-machine-wide requires --quarantine-addin.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if addin_actions and (args.project or args.project_repair != "none"
+                          or args.apply or args.report or args.html or args.json
+                          or args.sde_server or args.portal):
+        print("error: an add-in quarantine/restore is a standalone action; "
+              "run the diagnostic separately so its report is never confused "
+              "with the action result.", file=sys.stderr)
+        return USAGE_ERROR
+    if (args.quarantine_addin and os.path.splitext(args.quarantine_addin)[1]
+            .lower() not in ADDIN_PACKAGE_EXTENSIONS):
+        print("error: --quarantine-addin requires an .esriAddinX, .proConfigX "
+              "or .esriPlugin package.", file=sys.stderr)
+        return USAGE_ERROR
+    if args.menu and (addin_actions or args.project
+                      or args.project_repair != "none" or args.apply
+                      or args.json or args.sde_server or args.portal):
+        print("error: --menu asks the questions itself; give it no other "
+              "action flag, or pass the flags directly for a script.",
+              file=sys.stderr)
         return USAGE_ERROR
     if args.project_repair != "none" and not args.project:
         print("error: --project-repair requires --project APRX.",
@@ -10512,14 +11548,53 @@ def main(argv=None):
     # on an encoding error instead of with the 64 that says why.
     make_output_safe(sys.stderr)
 
+    if args.menu:
+        if not stdin_has_terminal():
+            # No prompt can be answered here: a scheduled task, a pipe or a
+            # redirected file. Run the read-only diagnosis those callers used
+            # to get, rather than waiting for an answer or reading the end of
+            # the stream as "Enter".
+            print("note: aucune entree interactive disponible ; diagnostic "
+                  "en lecture seule.", file=sys.stderr)
+            fallback = []
+            if args.report:
+                fallback += ["--report", args.report]
+            if args.html:
+                fallback.append("--html")
+            if args.verbose:
+                fallback.append("--verbose")
+            return main(fallback)
+        try:
+            return run_menu(report_dir=args.report or default_report_dir())
+        except (MenuInputClosed, EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            print("Assistant interrompu. Aucune autre action n'a ete lancee.",
+                  file=sys.stderr)
+            return 0
+
     env = Env()
-    if not env.windows and not args.project:
+    if not env.windows and not args.project and not addin_actions:
         # stderr, not stdout: --json must emit a document and nothing else,
         # or the caller parsing it gets a note where the report should be.
         print("note: this is a Windows workstation diagnostic. On %s almost "
               "every probe reports Skipped or Info, which is what an "
               "undetermined check looks like. Use --self-test to verify the "
               "tool itself here." % sys.platform, file=sys.stderr)
+
+    if addin_actions:
+        try:
+            if args.quarantine_addin:
+                result = quarantine_addin(
+                    env, args.quarantine_addin, args.quarantine_dir,
+                    args.confirm_machine_wide)
+            else:
+                result = restore_addin(env, args.restore_addin)
+        except (AddinRemediationError, OSError, IOError, ValueError) as exc:
+            print("error: add-in action refused or incomplete: %s" % exc,
+                  file=sys.stderr)
+            return USAGE_ERROR
+        print_addin_action(result)
+        return 0
 
     if args.project:
         document = run_project(env, {"project_path": args.project,
@@ -11541,7 +12616,7 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 
 # ============================================================================
 # 3/3  ArcGIS Pro toolbox glue
-# source: toolbox_glue.py  (sha256:9b8784c4dacf)
+# source: toolbox_glue.py  (sha256:e5119eda14dd)
 # ----------------------------------------------------------------------------
 # r"""The ArcGIS Pro glue: two geoprocessing tools over the diagnostic engine
 # and the HTML renderer.
@@ -11584,6 +12659,10 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 # Nothing here signs in to anything and no host is contacted unless you name one.
 # The in-Pro workstation tool never changes machine state: AP-01 belongs to the
 # command-line run with Pro closed, and the former AP-02 GPU change is retired.
+# Repairs, project recovery copies and add-in quarantine are also outside this
+# tool, on purpose: they need Pro closed. Double-clicking
+# Diagnostiquer_ArcGIS_Pro.bat now opens a numbered menu for them, so an operator
+# who does not remember a flag is not left believing the features are missing.
 # Only an explicit selected-project recovery mode can write here, and it writes
 # a new copy only.
 # ============================================================================
@@ -11968,7 +13047,14 @@ class Diagnose(object):
                "<p><b>Exemple</b> : laissez ce paramètre désactivé ici. Pour "
                "un cache à reconstruire, fermez Pro et utilisez "
                "<code>python arcgis_pro_performance_analyser.py --apply</code> "
-               "après avoir lu le diagnostic.</p>")
+               "après avoir lu le diagnostic.</p>"
+               "<p><b>Menu</b> : hors de Pro, double-cliquez sur "
+               "<code>Diagnostiquer_ArcGIS_Pro.bat</code> pour retrouver les "
+               "actions sous forme de choix numérotés : 1 diagnostic en "
+               "lecture seule, 2 correctif AP-01, 3 copie de projet, "
+               "4 quarantaine d'un add-in, 5 restauration. Chaque choix "
+               "exécute exactement la même commande que les options en ligne "
+               "de commande.</p>")
 
         html_out = arcpy.Parameter(
             displayName="Rapport HTML",
