@@ -96,7 +96,8 @@ de diagnostic ou d'écriture. Les codes 0 à 3 signifient que le diagnostic a
 terminé ; 1 et 2 signalent des constats à lire. Le code 64 signale un usage,
 une action refusée ou une écriture invalide. **Tant que vous ne choisissez que
 1 ou Entrée**, le lanceur ne répare aucun projet et ne modifie ni le registre
-ni les add-ins.
+ni les add-ins. Si le menu lui-même échoue, le code est 64 et non 1 : la pile
+d'appels est affichée pour être transmise, et aucune action n'est lancée.
 
 ### Les mêmes actions, sans menu, pour un script
 
@@ -329,7 +330,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 828 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 834 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -513,7 +514,7 @@ rapport le dit.
 
 ```
 python tests/test_toolbox.py      # 144 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 828 assertions sur le diagnostic
+python arcgis_pro_performance_analyser.py --self-test   # 834 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 
