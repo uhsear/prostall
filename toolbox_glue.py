@@ -124,7 +124,7 @@ def _emit_findings(document, messages):
         messages.addWarningMessage(
             "[%s] %s — %s" % (check.get("id"),
                               "ANOMALIE" if check.get("status") == "Fail"
-                              else "AVERTISSEMENT", check.get("title")))
+                              else "AVERTISSEMENT", engine.check_name(check)))
         evidence = [line for line in (check.get("observed") or "").splitlines()
                     if line.strip()]
         for line in evidence[:3]:

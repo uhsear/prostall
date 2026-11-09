@@ -225,8 +225,7 @@ def _ratio_gauge(label, value, limit, unit, invert, check_id):
     tone = "good" if pct >= 66 else ("warn" if pct >= 33 else "bad")
     if not invert:
         tone = "good" if pct >= 100 else ("warn" if pct >= 66 else "bad")
-    return gauge(label, pct, caption, tone,
-                 sub=("%s: %s" % (check_id, unit)))
+    return gauge(label, pct, caption, tone, sub="réf. %s" % check_id)
 
 
 def gauges(document):
@@ -247,13 +246,13 @@ def gauges(document):
                          "%.1f Go libres sur %.1f Go"
                          % (_kpi(by_id["PF-12"], "free_gb") or 0,
                             _kpi(by_id["PF-12"], "total_gb") or 0),
-                         sub="PF-12"))
+                         sub="réf. PF-12"))
     disk = _kpi(by_id.get("PF-13"), "free_pct_worst")
     if disk is not None:
         out.append(gauge("Disque libre (pire volume)", disk,
                          "%.1f Go libres"
                          % (_kpi(by_id["PF-13"], "free_gb_worst") or 0),
-                         sub="PF-13"))
+                         sub="réf. PF-13"))
     share = _ratio_gauge("Latence du partage",
                          _kpi(by_id.get("PF-03"), "worst_ms"),
                          _kpi(by_id.get("PF-03"), "fail_ms") or 1500,
@@ -274,7 +273,7 @@ def gauges(document):
                          % (cache_bytes / 1024.0 ** 3,
                             _kpi(by_id["PF-06"], "stale_pct") or 0),
                          "good" if pct >= 100 else
-                         ("warn" if pct >= 33 else "bad"), sub="PF-06"))
+                         ("warn" if pct >= 33 else "bad"), sub="réf. PF-06"))
     return out
 
 
@@ -303,13 +302,16 @@ def symptom_flags(document):
 def _flags_section(document):
     symptoms = document.get("symptoms") or SYMPTOM_FALLBACK
     flags = symptom_flags(document)
+    doc_by_id = dict((c.get("id"), c) for c in document.get("checks") or [])
     rows = []
     for code, label in symptoms:
         ids = flags.get(code) or []
         tone = "bad" if ids else "calm"
         badge = ('<span class="flag hit">%d</span>' % len(ids)) if ids \
             else '<span class="flag none">0</span>'
-        links = " ".join('<a href="#check-%s">%s</a>' % (esc(cid), esc(cid))
+        links = " ".join(
+            '<a href="#check-%s">%s <span class="ref">%s</span></a>'
+            % (esc(cid), esc(display_name(doc_by_id.get(cid) or {})), esc(cid))
                          for cid in ids) or "aucun contrôle en anomalie"
         rows.append('<div class="flagrow %s"><div class="flaghead">%s '
                     '<b>%s</b></div><div class="flagtext">%s</div>'
@@ -416,8 +418,11 @@ padding:14px 16px;margin:10px 0}
 .check.is-info{border-left:4px solid var(--info)}
 .check.is-skipped{border-left:4px solid var(--skip)}
 .chead{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline}
-.chead .id{font:600 13px ui-monospace,Consolas,monospace;color:var(--mut)}
-.chead .ttl{font-weight:600}
+.chead .ttl{font-weight:600;font-size:16px;flex:1 1 340px;line-height:1.35}
+.ref{font:600 11px ui-monospace,Consolas,monospace;color:var(--mut);
+border:1px solid var(--line);border-radius:999px;padding:1px 7px;
+background:#f2f4f7;white-space:nowrap}
+.flaglinks a .ref{margin-left:2px}
 .chead .cat2{font-size:11px;color:var(--mut);border:1px solid var(--line);
 border-radius:4px;padding:1px 6px;margin-left:auto}
 .badge{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
@@ -601,8 +606,9 @@ def _banner(document):
     act = document.get("act_first") or []
     if act:
         items = "".join(
-            '<li><b><a href="#check-%s">%s</a></b> &mdash; %s</li>'
-            % (esc(cid), esc(cid), esc((by_id.get(cid) or {}).get("title", "")))
+            '<li><b><a href="#check-%s">%s</a></b> '
+            '<span class="ref">%s</span></li>'
+            % (esc(cid), esc(display_name(by_id.get(cid) or {})), esc(cid))
             for cid in act)
         return ('<div class="banner act"><h3>&#9873; &Agrave; traiter en '
                 'premier &mdash; ces trouvailles portent sur les modifications '
@@ -655,6 +661,18 @@ def _reading_guide(document):
             'production.</div></div></section>' % esc(intro))
 
 
+def display_name(check):
+    """The French name of a check: the heading, not the code.
+
+    The report used to print the code as the heading and the check's own name
+    in English beside it, so a French operator had to decode both before
+    knowing what had been tested. The name leads now and the code stays as a
+    small reference, because a support case and a JSON diff still need one
+    identifier that survives a re-wording.
+    """
+    return (check.get("title_fr") or check.get("title") or "")
+
+
 def _check_card(check):
     status = check.get("status", "")
     cls = STATUS_CLASSES.get(status, "st-skipped")
@@ -664,14 +682,17 @@ def _check_card(check):
              % (cls.replace("st-", ""), esc(check.get("id")), esc(status),
                 "1" if finding else "0",
                 "1" if check.get("dataloss") else "0")]
-    parts.append('<div class="chead"><span class="id">%s</span>'
-                 '<span class="badge %s">%s</span>%s'
+    parts.append('<div class="chead">'
                  '<span class="ttl">%s</span>'
+                 '<span class="badge %s">%s</span>%s'
+                 '<span class="ref" title="r&eacute;f&eacute;rence '
+                 'technique du contr&ocirc;le">%s</span>'
                  '<span class="cat2">%s</span></div>'
-                 % (esc(check.get("id")), cls, esc(STATUS_FR.get(status, status)),
+                 % (esc(display_name(check)), cls,
+                    esc(STATUS_FR.get(status, status)),
                     '<span class="dl">perte de donn&eacute;es</span>'
                     if check.get("dataloss") else "",
-                    esc(check.get("title")), esc(check.get("category"))))
+                    esc(check.get("id")), esc(check.get("category"))))
 
     parts.append('<div class="blk"><div class="h">%s</div>%s</div>'
                  % ("Probl&egrave;me d&eacute;tect&eacute; &mdash; valeurs "
@@ -732,6 +753,11 @@ def _check_card(check):
             parts.append('<div class="kpichips">%s</div>' % chips)
 
     extras = []
+    if check.get("title") and check.get("title") != display_name(check):
+        extras.append('<div class="blk"><div class="h">Intitul&eacute; '
+                      'd&rsquo;origine (r&eacute;f&eacute;rence support)'
+                      '</div><div class="impact">%s</div></div>'
+                      % esc(check.get("title")))
     if check.get("expected"):
         extras.append('<div class="blk"><div class="h">Valeur ou &eacute;tat '
                       'attendu</div><div class="impact">%s</div></div>'

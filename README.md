@@ -194,7 +194,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-834 assertions, 0 failed
+852 assertions, 0 failed
 ```
 
 ## Requirements
@@ -221,7 +221,7 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The suite contains 834 assertions with platform-neutral labels. That matters more than it sounds:
+The suite contains 852 assertions with platform-neutral labels. That matters more than it sounds:
 the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
 the standard library answers for the host instead of for the path. The reads that only exist on
 Windows are also exercised with the platform switched off, so Linux and Windows can cover each
@@ -676,7 +676,7 @@ missing on the machine it lands on.
 | `html_report.py` | The HTML renderer. A pure function over the report document, no `arcpy` |
 | `toolbox_glue.py` | The ArcGIS Pro glue. The only part that imports `arcpy` |
 | `build_toolbox.py` | Assembles those three into the one `.pyt` |
-| `tests/test_toolbox.py` | 144 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
+| `tests/test_toolbox.py` | 156 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
 
 Install by copying that one `.pyt` anywhere stable, then Catalog pane > Toolboxes > Add Toolbox,
 pointing at it. The tool appears under "ArcGIS Pro Performance Analyser".
@@ -698,10 +698,14 @@ The HTML is one page with no external asset at all, so it opens on a workstation
 - **gauges** in inline SVG for the health score, the coverage, free memory, free disk on the worst
   volume, share latency, negotiated link speed and cache size;
 - **flags**, one row per symptom S1-S6 (including a crash while opening a project), counting the
-  findings whose impact line names that symptom and linking to each of them;
-- every check as a card: status badge, data-loss marker, the measured problem, a plain-French
-  explanation, the concrete ArcGIS Pro impact, ordered remediation steps and an after-fix
-  verification, with the expected value and technical evidence folded away;
+  findings whose impact line names that symptom and linking to each of them by name;
+- every check as a card: **the check's French name as the heading**, the status badge, the
+  data-loss marker, the measured problem, a plain-French explanation, the concrete ArcGIS Pro
+  impact, ordered remediation steps and an after-fix verification, with the expected value and
+  technical evidence folded away. The identifier (`DL-09`, `PF-06`) is a small reference beside the
+  heading: it survives a re-wording, so a support case and a JSON diff keep one stable handle, but
+  it is never what the reader has to decode first. The original English wording is kept inside the
+  folded details, for Esri support;
 - the fix gates, the undo command of anything applied, a legend, and the JSON document embedded for
   the diff.
 
@@ -733,8 +737,8 @@ Pro and run `arcgis_pro_performance_analyser.py` in the editor's own session. Th
 while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
-python tests/test_toolbox.py      # 144 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 834 assertions over the diagnostic
+python tests/test_toolbox.py      # 156 assertions over the renderer, both tools and project recovery
+python arcgis_pro_performance_analyser.py --self-test   # 852 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 

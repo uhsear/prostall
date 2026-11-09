@@ -12,3 +12,6 @@ logs/
 credentials*
 *token*
 demo/
+
+# A preview of an operator's own report, rendered locally: never shipped.
+rapport_relu_*.html

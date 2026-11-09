@@ -261,6 +261,46 @@ page = html_report.render_html(document, verbose=True,
 check(len(document["checks"]) > 0 and all(
     'data-status="%s"' % c["status"] in page for c in document["checks"]),
     "every check of the run is on the page, tagged with its own status")
+# The operator reads a name; the code is a reference kept for the support
+# case and the JSON diff. Leading with "DL-09" asked a French editor to decode
+# a code and an English title before knowing what had been tested.
+named = [c for c in document["checks"] if c.get("title_fr")]
+check(named and all(html_report.display_name(c) == c["title_fr"]
+                    for c in named),
+      "each card is headed by the French name of the check  <-- pinned defect")
+check(not any((c.get("title_fr") or "") == (c.get("title") or "")
+              for c in document["checks"]),
+      "and no card kept its English title as the heading")
+cards = re.findall(r'<div class="chead">(.*?)</div>', page, re.S)
+check(cards and all('<span class="ttl">' in card for card in cards),
+      "the heading element holds the name")
+check(len(re.findall(r'<div class="chead"><span class="ttl">', page))
+      == len(document["checks"]),
+      "the name comes first in every heading, not the code  <-- pinned defect")
+check(cards and all(card.rstrip().endswith('</span>') for card in cards)
+      and len(cards) == len(document["checks"]),
+      "each heading is closed cleanly, one per check")
+check(cards and all('<span class="ref"' in card for card in cards),
+      "and the code is rendered as a small reference")
+check('<span class="id">' not in page,
+      "the old code-as-heading element is gone from the page")
+# The renderer escapes apostrophes, so the page is compared with them
+# normalised rather than with the raw French string.
+plain = page.replace("&#x27;", "'").replace("&amp;", "&")
+check(named and all(html_report.display_name(c) in plain for c in named),
+      "every name actually reaches the page")
+check(html_report.display_name({"title": "Fallback only"}) == "Fallback only",
+      "a check with no French name falls back to its own title, never to an "
+      "empty heading")
+check(html_report.display_name({}) == "",
+      "and a nameless record renders nothing rather than raising")
+banner_start = page.find('class="banner act"')
+banner = page[banner_start:page.find("</div>", banner_start)] if banner_start >= 0 else ""
+check(not banner or ("&mdash; DL-" not in banner and "&mdash; PF-" not in banner),
+      "the act-first banner names the findings instead of leading with codes")
+check("réf. PF-12" in page or "réf. PF-13" in page,
+      "the gauges label their source as a reference, not as a bare code")
+
 ids = [c["id"] for c in document["checks"]]
 check(all((">%s<" % cid) in page or ('id">%s<' % cid) in page for cid in ids),
     "and every id appears, so no check is dropped by the renderer")

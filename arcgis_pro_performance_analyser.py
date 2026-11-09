@@ -379,6 +379,10 @@ PROJECT_JSON_MAX_TOTAL_BYTES = 256 * 1024 ** 2
 PROJECT_HISTORY_WARN = 100
 PROJECT_HISTORY_WARN_BYTES = 10 * 1024 ** 2
 PROJECT_REPAIR_MODES = ("none", "repack", "views", "views_history")
+
+# How many leftover session folders PF-07 prints. Everything that still holds
+# work is printed before the empty husks, so this limit only ever hides empties.
+PROTEMP_LISTED = 30
 PROJECT_CHECK_IDS = ("PR-01", "PR-02", "PR-03", "PR-04", "PR-05", "PR-06")
 
 # Startup customisation packages are inspected without loading their code or
@@ -782,6 +786,66 @@ GUIDANCE_FR = {
 }
 
 
+# The French name of each indicator. The report used to lead with the code
+# ("DL-09") and keep the name in English ("ArcGIS Pro crash dumps..."), which
+# asked a French operator to decode both a code and a translation before
+# knowing what had been tested. The name is now the heading and the code stays
+# as a small reference, because a support case, a JSON diff and a re-run all
+# need an identifier that survives a wording change.
+TITLE_FR = {
+    "DL-00": "Compte Windows utilisé pour le diagnostic",
+    "DL-03": "Sauvegarde automatique du projet (et ce qu'elle ne protège pas)",
+    "DL-04": "Mise en veille de la carte réseau",
+    "DL-05": "Emplacement des projets : disque local ou partage réseau",
+    "DL-06": "Dossiers Documents redirigés vers OneDrive",
+    "DL-07": "Fichiers de projet « déshydratés » (cloud)",
+    "DL-08": "Fichiers hors connexion sur les projets réseau",
+    "DL-09": "Vidages mémoire d'ArcGIS Pro (plantages)",
+    "DL-10": "Serveur de géodatabase : joignabilité et latence",
+    "DL-11": "Fichiers de connexion SDE présents sur le poste",
+    "DL-12": "ArcGIS Pro ouvert pendant le diagnostic",
+    "DL-13": "Plantages, blocages et arrêts brutaux dans le journal Windows",
+    "PF-01": "Systèmes de coordonnées et reprojection à la volée",
+    "PF-02": "Réglages réseau SMB du poste",
+    "PF-03": "Temps de listage du dossier de projet sur le partage",
+    "PF-04": "Version et correctif d'ArcGIS Pro",
+    "PF-05": "Réglages d'affichage et de rendu dans ArcGIS Pro",
+    "PF-06": "Taille et ancienneté du cache local ESRI",
+    "PF-07": "Dossiers de session laissés dans Temp (travail non enregistré ?)",
+    "PF-08": "Index de recherche du projet et du catalogue",
+    "PF-09": "Couches servies par une URL réseau",
+    "PF-10": "Poids du projet : couches, groupes imbriqués, taille du fichier",
+    "PF-11": "Carte graphique choisie par Windows pour ArcGIS Pro",
+    "PF-12": "Mémoire vive disponible",
+    "PF-13": "Espace disque libre",
+    "PF-14": "Charge d'affichage par couche : jointures, requêtes, étiquettes",
+    "PF-15": "Mode d'alimentation du poste",
+    "PF-16": "Pyramides (overviews) des rasters",
+    "PF-17": "Exclusions Microsoft Defender pour ArcGIS Pro",
+    "PF-18": "Type de disque sous les caches et le projet",
+    "PF-19": "Portail : joignabilité et latence",
+    "PF-20": "Fichier d'échange (mémoire virtuelle)",
+    "PF-21": "Débit négocié de la carte réseau",
+    "PF-22": "Minuteries de rafraîchissement et géodatabase par défaut du projet",
+    "PF-26": "Profil itinérant contenant les réglages ESRI",
+    "PF-27": "Symbologie non rafraîchie après un calcul de champ",
+    "PF-28": "Processeur : modèle, cœurs et fréquence",
+    "PF-29": "Carte graphique et ancienneté du pilote",
+    "PF-30": "Poids du dossier de données : géodatabases, rasters, fichiers",
+    "PF-31": "Add-ins et plug-ins chargés au démarrage",
+}
+
+
+def check_name(check):
+    """The French name of a check, falling back to its own title.
+
+    The project checks (PR-xx) already carry a French title, so they need no
+    entry in TITLE_FR and get their own wording back unchanged.
+    """
+    return (check.get("title_fr") or TITLE_FR.get(check.get("id"))
+            or check.get("title") or "")
+
+
 def enrich_check(check):
     """Attach the French explanation and ordered actions to one check."""
     guidance = GUIDANCE_FR.get(check.get("id"))
@@ -791,6 +855,7 @@ def enrich_check(check):
         check.setdefault("impact_fr", impact_fr)
         check.setdefault("steps", list(steps))
         check.setdefault("verification", verification)
+    check.setdefault("title_fr", TITLE_FR.get(check.get("id"), ""))
     return check
 
 
@@ -1539,10 +1604,18 @@ def decide_protemp(folders, temp_root):
                      "unsaved scratch work to recover from one." % temp_root,
             expected="None, or a few that can be inspected.",
             impact="S3, no recovery lead here.", fix="None.")
+    # Sort before truncating, never after. The old order was newest-first, so
+    # the thirty lines printed were the sessions of the last few minutes - all
+    # empty - and the folders that still held a project file fell into the
+    # "... N more not listed" tail. The recovery lead was the part the report
+    # hid, which is the one thing this check exists to surface.
+    # `folders` arrives newest-first, and sorted() is stable, so this keeps
+    # that order inside each group.
+    ordered = sorted(folders, key=lambda item: item[3] == 0 and item[4] == 0)
     lines = []
     with_work = []
     total = 0
-    for name, when, size, projects, tables in folders:
+    for name, when, size, projects, tables in ordered:
         total += size
         works = (projects > 0 or tables > 0)
         if works:
@@ -1551,12 +1624,13 @@ def decide_protemp(folders, temp_root):
                      "tables=%d%s"
                      % (when, name, format_bytes(size), projects, tables,
                         "   <-- MAY HOLD UNSAVED WORK" if works else ""))
+    shown = lines[:PROTEMP_LISTED]
+    hidden = len(folders) - len(shown)
     observed = ["%d folder(s), %s total, under %s"
                 % (len(folders), format_bytes(total), temp_root)]
-    observed.extend(lines[:30])
-    if len(folders) > 30:
-        observed.append("... %d more folder(s) not listed."
-                        % (len(folders) - 30))
+    observed.extend(shown)
+    if hidden:
+        observed.append("... %d empty folder(s) not listed." % hidden)
     observed.append("%d of %d folder(s) still hold a project file or a "
                     "non-empty scratch table."
                     % (len(with_work), len(folders)))
@@ -6189,7 +6263,7 @@ def apply_fixes(checks, env, facts, do_apply):
             blocking = by_id(checks, blocker)
             if blocking is not None and blocking["status"] != "Pass":
                 notes.append("refused [%s] %s: %s"
-                             % (cid, blocker, blocking["title"]))
+                             % (cid, blocker, check_name(blocking)))
                 continue
         summary = (handler.__doc__ or "").strip().splitlines()[0]
         if not do_apply:
@@ -6504,13 +6578,13 @@ def render(document, verbose=False):
                      % len(document["fixable"]))
         for cid in document["fixable"]:
             check = by_id(document["checks"], cid)
-            lines.append("     %s  %s" % (cid, check["title"]))
+            lines.append("     %s  %s" % (cid, check_name(check)))
     if document["act_first"]:
         lines.append("")
         lines.append("  ACT ON THESE FIRST (they bear on the vanished edits):")
         for cid in document["act_first"]:
             check = by_id(document["checks"], cid)
-            lines.append("     %s  %s" % (cid, check["title"]))
+            lines.append("     %s  %s" % (cid, check_name(check)))
     if document["notes"]:
         lines.append("")
         lines.append("--- FIXES " + "-" * 64)
@@ -6527,7 +6601,7 @@ def render_check(check, verbose=False):
     """One check, as the report prints it."""
     lines = ["%s [%-7s] %-6s %s"
              % ("DATA" if check["dataloss"] else "    ",
-                check["status"].upper(), check["id"], check["title"])]
+                check["status"].upper(), check["id"], check_name(check))]
     for line in check["observed"].split("\n"):
         if line.strip():
             lines.append("          " + line)
@@ -6545,6 +6619,8 @@ def render_check(check, verbose=False):
         if check["fix"] and not check.get("steps"):
             lines.append("          fix    : %s" % check["fix"])
     if verbose:
+        if check.get("title") and check["title"] != check_name(check):
+            lines.append("          intitulé d'origine : %s" % check["title"])
         if check["expected"]:
             lines.append("          expect : %s" % check["expected"])
         for line in check["detail"].split("\n"):
@@ -8052,8 +8128,21 @@ def self_test():
           "below the threshold is history rather than a finding")
     many = decide_protemp([("F%d" % n, "2026-01-01 00:00", 1, 0, 0)
                            for n in range(40)], "T")
-    check("10 more folder(s) not listed" in _join(many["observed"]),
+    check("10 empty folder(s) not listed" in _join(many["observed"]),
           "and a long list is truncated with a count of what it left out")
+
+    # The shape of the real incident: forty empty husks from the last few
+    # minutes, and one folder from the crash day that still holds a project.
+    # Newest-first truncation hid exactly the line worth acting on.
+    buried = ([("E%d" % n, "2026-11-09 13:57", 0, 0, 0) for n in range(40)]
+              + [("OLD-WORK", "2026-11-05 12:16", 2048, 1, 2)])
+    buried_rec = decide_protemp(buried, "T")
+    lines = _join(buried_rec["observed"]).splitlines()
+    check("OLD-WORK" in _join(buried_rec["observed"]),
+          "a folder that still holds work is printed even behind forty newer "
+          "empty ones  <-- pinned defect")
+    check(lines[1].startswith("2026-11-05 12:16"),
+          "and it is printed first, because it is the line to act on")
 
     check(decide_pro_version(None, None, None, None, None)["status"] == "Info",
           "no Pro install found: undetermined, and no verdict on a version "
@@ -10730,6 +10819,68 @@ def self_test():
                                         sort_keys=True),
           "on a Windows host there is no off-Windows note, and the JSON keys "
           "are sorted so two reports diff cleanly  <-- pinned defect")
+
+    # ------------------------------------------------- the names, not the codes
+    print("-" * 70)
+    print("a check is named in French, and its code is only a reference")
+
+    named = run(fake_healthy(), opts_with())
+    sick_named = run(fake_sick(), opts_with())
+    for label, document in (("healthy", named), ("sick", sick_named)):
+        missing = [c["id"] for c in document["checks"]
+                   if not (c.get("title_fr") or "").strip()]
+        check(not missing,
+              "%s run: every check carries a French name (%s)"
+              % (label, ", ".join(missing) or "all named"))
+        untranslated = [c["id"] for c in document["checks"]
+                        if c.get("title_fr") == c.get("title")]
+        check(not untranslated,
+              "%s run: no name was left in English (%s)"
+              % (label, ", ".join(untranslated) or "none"))
+        names = [(c.get("title_fr") or "") for c in document["checks"]]
+        accented = [name for name in names if any(ord(char) > 127
+                                                 for char in name)]
+        check(len(accented) >= len(names) // 3,
+              "%s run: the names are written in French, accents included "
+              "(%d of %d carry one)" % (label, len(accented), len(names)))
+        english = [name for name in names if " the " in name.lower()]
+        check(not english,
+              "%s run: and none of them is a half-translated English phrase "
+              "(%s)" % (label, "; ".join(english) or "none"))
+
+    stray = sorted(set(TITLE_FR) - set(GUIDANCE_FR))
+    check(not stray,
+          "every French name belongs to a check this tool actually runs (%s)"
+          % (", ".join(stray) or "none stray"))
+    uncovered = sorted(set(GUIDANCE_FR) - set(TITLE_FR)
+                       - set(PROJECT_CHECK_IDS))
+    check(not uncovered,
+          "and every workstation check with French guidance has a French "
+          "name (%s)" % (", ".join(uncovered) or "none missing"))
+    check(len(set(TITLE_FR.values())) == len(TITLE_FR),
+          "no two checks share a name, so a reader is never sent to the wrong "
+          "card  <-- pinned defect")
+
+    check(check_name({"id": "DL-09"}) == TITLE_FR["DL-09"],
+          "check_name returns the French name for a workstation check")
+    check(check_name({"id": "PR-01", "title": "Lisibilité du .aprx"})
+          == "Lisibilité du .aprx",
+          "and the project checks keep the French title they were written "
+          "with, without a second table")
+    check(check_name({"id": "ZZ-99", "title": "Something else"})
+          == "Something else",
+          "an unknown check falls back to its own title rather than an empty "
+          "heading")
+
+    first_line = render_check([c for c in sick_named["checks"]
+                               if c["id"] == "DL-13"][0])[0]
+    check(TITLE_FR["DL-13"] in first_line and "Event timeline" not in first_line,
+          "the text report also leads with the name, not the English wording")
+    verbose_lines = render_check([c for c in sick_named["checks"]
+                                  if c["id"] == "DL-13"][0], verbose=True)
+    check(any("intitulé d'origine" in line for line in verbose_lines),
+          "the original wording survives in verbose output, for the support "
+          "case")
 
     # ------------------------------------------------------------- the menu
     print("-" * 70)

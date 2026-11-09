@@ -330,7 +330,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 834 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 852 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -513,8 +513,8 @@ rapport le dit.
 ## Vérifier
 
 ```
-python tests/test_toolbox.py      # 144 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 834 assertions sur le diagnostic
+python tests/test_toolbox.py      # 156 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
+python arcgis_pro_performance_analyser.py --self-test   # 852 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 
