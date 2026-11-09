@@ -3,7 +3,8 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>&1
 pushd "%~dp0"
 
-rem Default: read-only diagnostic. Mutating modes require an explicit argument.
+rem No argument: the interactive menu, whose first choice is the read-only
+rem diagnostic. Mutating modes still need an explicit choice or argument.
 set "SCRIPT=%~dp0arcgis_pro_performance_analyser.py"
 set "RENDERER=%~dp0html_report.py"
 set "MODE=diagnose"
@@ -16,7 +17,7 @@ set "MACHINE_FLAG="
 set "SHOW_HELP="
 set "REPORT_PATTERN=arcgis_pro_performance_analyser_*.html"
 
-if "%~1"=="" goto DEFAULTS
+if "%~1"=="" goto MENU_MODE
 if /i "%~1"=="--repair-aprx" (
     set "MODE=repair"
     set "PROJECT=%~2"
@@ -48,8 +49,15 @@ if /i "%~1"=="--help" (
     set "SHOW_HELP=1"
     goto USAGE
 )
+if /i "%~1"=="--menu" if not "%~2"=="" goto USAGE
+if /i "%~1"=="--menu" goto MENU_MODE
 set "OUT=%~1"
 if not "%~2"=="" goto USAGE
+goto DEFAULTS
+
+:MENU_MODE
+set "MODE=menu"
+goto DEFAULTS
 
 :DEFAULTS
 if not defined OUT set "OUT=%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports"
@@ -75,10 +83,22 @@ if not defined PYTHON (
 )
 if not defined PYTHON goto NO_PYTHON
 
+if /i "%MODE%"=="menu" goto RUN_MENU
 if /i "%MODE%"=="repair" goto REPAIR_PROJECT
 if /i "%MODE%"=="quarantine" goto QUARANTINE_ADDIN
 if /i "%MODE%"=="restore" goto RESTORE_ADDIN
 goto RUN_DIAGNOSTIC
+
+:RUN_MENU
+echo.
+echo === Assistant ArcGIS Pro : menu interactif ===
+echo 1 diagnostic, 2 correctif AP-01, 3 copie de projet, 4 quarantaine, 5 restauration.
+echo ArcGIS Pro peut rester ouvert pour le diagnostic ; fermez-le avant une action.
+echo Rapports : "%OUT%"
+echo.
+"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%" --menu --report "%OUT%" --html
+set "RC=%ERRORLEVEL%"
+goto MENU_DONE
 
 :RUN_DIAGNOSTIC
 set "ACTION_FLAG="
@@ -163,6 +183,20 @@ echo HTML : lecture. TXT : ticket support. JSON : comparaison.
 echo Dossier : "%OUT%"
 goto FINISH
 
+:MENU_DONE
+if %RC% LEQ 3 goto MENU_OK
+echo.
+echo L'assistant s'est arrete sur le code %RC%. Lisez le message ci-dessus.
+echo Aucune autre action n'a ete lancee.
+goto FINISH
+
+:MENU_OK
+echo.
+echo Assistant termine. Code %RC%. Rapports eventuels : "%OUT%"
+echo 0 rien a signaler ; 1/2 constats a lire ; 64 action refusee.
+echo Pour ne pas passer par le menu, les options restent disponibles : voir --help.
+goto FINISH
+
 :ACTION_FAILED
 echo.
 echo Action refusee ou incomplete. Code : %RC%. Lisez le message ci-dessus.
@@ -172,13 +206,19 @@ goto FINISH
 :USAGE
 echo.
 echo Usage :
+echo   Diagnostiquer_ArcGIS_Pro.bat                  menu interactif
+echo   Diagnostiquer_ArcGIS_Pro.bat --menu
 echo   Diagnostiquer_ArcGIS_Pro.bat [dossier_rapports]
 echo   Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes
 echo   Diagnostiquer_ArcGIS_Pro.bat --repair-aprx "projet.aprx" [views^|views_history^|repack^|none]
 echo   Diagnostiquer_ArcGIS_Pro.bat --quarantine-addin "package.esriAddinX" [--confirm-machine-wide]
 echo   Diagnostiquer_ArcGIS_Pro.bat --restore-addin "quarantine.json"
 echo.
-echo Sans argument : diagnostic en lecture seule. La quarantaine n'efface pas les donnees.
+echo.
+echo Sans argument : menu numerote. Choix 1 = diagnostic en lecture seule,
+echo et c'est le choix pris par Entree. Les options ci-dessus restent la
+echo voie des scripts et des taches planifiees.
+echo La quarantaine retire un add-in du chargement sans l'effacer.
 if defined SHOW_HELP (set "RC=0") else (set "RC=64")
 goto FINISH
 

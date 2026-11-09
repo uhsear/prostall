@@ -194,7 +194,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-787 assertions, 0 failed
+828 assertions, 0 failed
 ```
 
 ## Requirements
@@ -221,7 +221,7 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The suite contains 787 assertions with platform-neutral labels. That matters more than it sounds:
+The suite contains 828 assertions with platform-neutral labels. That matters more than it sounds:
 the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
 the standard library answers for the host instead of for the path. The reads that only exist on
 Windows are also exercised with the platform switched off, so Linux and Windows can cover each
@@ -256,16 +256,37 @@ report, from the editor's own session, and says which of them it could not read.
 
 On Windows, keep `Diagnostiquer_ArcGIS_Pro.bat`,
 `arcgis_pro_performance_analyser.py` and `html_report.py` together and
-**double-click the `.bat`**. It needs no open ArcGIS Pro session, asks no
-question, runs the read-only workstation diagnostic and opens the resulting
-HTML report. TXT and JSON are written beside the HTML. The default folder is
+**double-click the `.bat`**. It opens a numbered menu, so every feature is
+reachable without remembering a flag and without keeping several batch files:
+
+```
+Assistant ArcGIS Pro : diagnostic, reparation et add-ins
+  1) Diagnostic complet, lecture seule (TXT, JSON et HTML)
+  2) Corriger le cache ESRI : AP-01, reversible, Pro ferme
+  3) Reparer une COPIE d'un projet .aprx (l'original reste intact)
+  4) Mettre en quarantaine un add-in precis, de facon reversible
+  5) Restaurer un add-in depuis son quarantine.json
+  6) Aide : dossiers, commandes equivalentes et codes de sortie
+  0) Quitter
+```
+
+Enter takes choice 1, the read-only run. It needs no open ArcGIS Pro session,
+writes TXT, JSON and HTML and prints their paths; open the HTML in a browser to
+read the report. The default folder is
 `%LOCALAPPDATA%\\ArcGISPro_PerformanceAnalyser\\Rapports`; pass another local
 folder as the batch file's first argument if needed. The console shows report
-and launcher failures and stays open until you read them. This default mode
-never passes `--apply`, never repairs a project or add-in, and never starts
-`ArcGISPro.exe`.
+and launcher failures and stays open until you read them.
 
-The same batch exposes separate, explicitly selected actions:
+The menu is a front end, not a second implementation. Each choice prints the
+`arcgis_pro_performance_analyser.py` line it maps to and then runs exactly
+that line, so the same refusals, the same undo text and the same exit codes
+apply. It never picks a project, a repair mode or an add-in on your behalf,
+and it never starts `ArcGISPro.exe`. A run with no terminal (a scheduled task,
+a pipe, a redirected file) is not shown a menu: it falls back to the read-only
+diagnostic instead of waiting for an answer nobody can type.
+
+The same actions are still available as explicit flags, which is what a script
+or a deployment should use:
 
 ```bat
 Diagnostiquer_ArcGIS_Pro.bat --apply-safe-fixes
@@ -280,8 +301,9 @@ modes also accept `repack` and `none`; every repair writes a new project beside
 the source. Quarantine requires the exact package path copied from PF-31 and
 Pro closed. It removes that package from startup loading but preserves its
 bytes, hash and restore manifest. After quarantine or restore, the batch runs a
-fresh diagnostic and opens its HTML report. See the safety gates below before
-using these modes.
+fresh diagnostic and opens its HTML report. The menu calls these same flags
+(choice 2 is `--apply`, choice 3 is `--repair-aprx`, and so on). See the safety
+gates below before using either route.
 
 For a scripted run, use the editor's own session, without elevation, while Pro
 is closed:
@@ -331,6 +353,7 @@ This writes `Broken_recuperation_sans_vues.aprx` beside the original. It removes
 | `--timeout MS` | `4000` | Bound on each network probe. |
 | `--project APRX` | none | Run the eleven-check selected-project analysis instead of the workstation analysis. Uses a snapshot; safe to use while another project is open. |
 | `--project-repair MODE` | `none` | With `--project`: `repack`, `views`, or `views_history`. Writes a verified new copy beside the source, never overwrites the source. `--apply` cannot be combined with this mode. |
+| `--menu` | off | Offer the actions as a numbered menu. Each choice runs the documented flag, so nothing is reachable here that a script could not run. Falls back to the read-only diagnostic when stdin has no terminal. |
 | `--apply` | off | Run the gated cache fix. It is refused unless its check actually failed and Pro is closed, prints its own undo, and never deletes anything. It never changes the GPU preference. |
 | `--quarantine-addin PACKAGE` | none | Move this exact PF-31-discovered package into verified quarantine. Pro must be closed; arbitrary files are refused. Standalone action, not an automatic diagnosis or fix. |
 | `--quarantine-dir DIR` | analyser folder under `LOCALAPPDATA` | Parent for quarantine transactions. It must be outside every discovered startup-loading folder. |
@@ -647,13 +670,13 @@ missing on the machine it lands on.
 
 | File | What it is |
 |---|---|
-| `Diagnostiquer_ArcGIS_Pro.bat` | Windows launcher: read-only TXT/JSON/HTML by default, plus explicit AP-01, `.aprx` recovery-copy and add-in quarantine/restore modes; keep the engine and renderer beside it |
+| `Diagnostiquer_ArcGIS_Pro.bat` | Windows launcher: a numbered menu on double-click (read-only diagnosis by default), plus the explicit AP-01, `.aprx` recovery-copy and add-in quarantine/restore flags for scripts; keep the engine and renderer beside it |
 | `ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt` | **The shipped artefact.** Two tools, with the engine and the renderer inlined |
 | `arcgis_pro_performance_analyser.py` | The diagnostic engine and CLI. A single file, no `arcpy` import |
 | `html_report.py` | The HTML renderer. A pure function over the report document, no `arcpy` |
 | `toolbox_glue.py` | The ArcGIS Pro glue. The only part that imports `arcpy` |
 | `build_toolbox.py` | Assembles those three into the one `.pyt` |
-| `tests/test_toolbox.py` | 139 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
+| `tests/test_toolbox.py` | 144 assertions over the renderer, both tools, in-Pro mutation guards and real temporary `.aprx` recovery copies, on a stand-in `arcpy` |
 
 Install by copying that one `.pyt` anywhere stable, then Catalog pane > Toolboxes > Add Toolbox,
 pointing at it. The tool appears under "ArcGIS Pro Performance Analyser".
@@ -710,8 +733,8 @@ Pro and run `arcgis_pro_performance_analyser.py` in the editor's own session. Th
 while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
-python tests/test_toolbox.py      # 139 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 787 assertions over the diagnostic
+python tests/test_toolbox.py      # 144 assertions over the renderer, both tools and project recovery
+python arcgis_pro_performance_analyser.py --self-test   # 828 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 

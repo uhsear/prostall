@@ -12,7 +12,7 @@ le poste où le fichier atterrit.
 
 | Fichier | Rôle |
 |---|---|
-| `Diagnostiquer_ArcGIS_Pro.bat` (à la racine) | Lecture seule par défaut, avec rapports TXT, JSON et HTML ; modes explicites AP-01, réparation de copie `.aprx` et quarantaine/restauration d'add-in ; nécessite le moteur et le rendu à côté de lui |
+| `Diagnostiquer_ArcGIS_Pro.bat` (à la racine) | Menu numéroté au double-clic (lecture seule par défaut, rapports TXT, JSON et HTML), plus les options explicites AP-01, réparation de copie `.aprx` et quarantaine/restauration d'add-in pour les scripts ; nécessite le moteur et le rendu à côté de lui |
 | `ArcGISPro_PerformanceAnalyser.pyt` | **L'artefact livré.** Deux outils, moteur et rendu inclus |
 | `arcgis_pro_performance_analyser.py` | Le moteur de diagnostic et sa ligne de commande. Sans `arcpy` |
 | `html_report.py` | Le rendu HTML. Fonction pure sur le document de rapport, sans `arcpy` |
@@ -52,11 +52,35 @@ bibliothèque standard uniquement.
 - `html_report.py`.
 
 **Double-cliquez sur `Diagnostiquer_ArcGIS_Pro.bat`.** Le lanceur recherche le
-Python d'ArcGIS Pro, puis `py -3` et `python` en secours. Il ne lance pas
-`ArcGISPro.exe` et ne charge aucun add-in. En mode diagnostic par défaut, il ne
-passe pas `--apply`. Pour les
-contrôles de projets récents, ArcGIS Pro doit être fermé ; le diagnostic du
-splash screen et des packages de démarrage ne nécessite pas de l'ouvrir.
+Python d'ArcGIS Pro, puis `py -3` et `python` en secours, puis affiche un menu
+numéroté. Il ne lance pas `ArcGISPro.exe` et ne charge aucun add-in.
+
+```text
+Assistant ArcGIS Pro : diagnostic, reparation et add-ins
+  1) Diagnostic complet, lecture seule (TXT, JSON et HTML)
+  2) Corriger le cache ESRI : AP-01, reversible, Pro ferme
+  3) Reparer une COPIE d'un projet .aprx (l'original reste intact)
+  4) Mettre en quarantaine un add-in precis, de facon reversible
+  5) Restaurer un add-in depuis son quarantine.json
+  6) Aide : dossiers, commandes equivalentes et codes de sortie
+  0) Quitter
+```
+
+**Entrée** accepte le choix 1, le diagnostic en lecture seule : il ne passe pas
+`--apply` et ne modifie rien. Il faut donc répondre explicitement `o` aux
+questions des choix 2, 4 et 5, et donner un chemin pour les choix 3 et 5.
+Chaque choix affiche d'abord la commande équivalente, puis l'exécute telle
+quelle : mêmes contrôles, mêmes refus, mêmes codes de sortie que les options en
+ligne de commande. Le menu ne choisit jamais un projet, un mode de réparation
+ou un add-in à votre place.
+
+Pour les contrôles de projets récents, ArcGIS Pro doit être fermé ; le
+diagnostic du splash screen et des packages de démarrage ne nécessite pas de
+l'ouvrir. Fermez Pro avant les choix 2, 3, 4 et 5.
+
+Un lancement sans console interactive (tâche planifiée, redirection, fichier
+en entrée) n'affiche pas le menu : le lanceur exécute alors le diagnostic en
+lecture seule, pour ne pas attendre une réponse que personne ne peut saisir.
 
 Les rapports **TXT, JSON et HTML autonome** sont créés dans
 `%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports`. Le HTML s'ouvre à la
@@ -70,13 +94,15 @@ Diagnostiquer_ArcGIS_Pro.bat "D:\Diagnostics\Poste"
 La fenêtre reste ouverte et affiche le dossier ainsi que les erreurs de Python,
 de diagnostic ou d'écriture. Les codes 0 à 3 signifient que le diagnostic a
 terminé ; 1 et 2 signalent des constats à lire. Le code 64 signale un usage,
-une action refusée ou une écriture invalide. **Sans argument**, le lanceur ne
-répare aucun projet et ne modifie ni le registre ni les add-ins.
+une action refusée ou une écriture invalide. **Tant que vous ne choisissez que
+1 ou Entrée**, le lanceur ne répare aucun projet et ne modifie ni le registre
+ni les add-ins.
 
-### Actions de dépannage explicites du même `.bat`
+### Les mêmes actions, sans menu, pour un script
 
-Fermez ArcGIS Pro avant toute action de poste ou de quarantaine. Les modes
-suivants ne sont jamais déclenchés par le double-clic par défaut :
+Le menu ne remplace pas les options : il les appelle. Un déploiement, un script
+ou une tâche planifiée doit utiliser directement les lignes suivantes, qui ne
+changent pas :
 
 ```bat
 rem Correctif automatisé limité au renommage réversible du cache (AP-01)
@@ -303,7 +329,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 787 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 828 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -486,8 +512,8 @@ rapport le dit.
 ## Vérifier
 
 ```
-python tests/test_toolbox.py      # 139 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 787 assertions sur le diagnostic
+python tests/test_toolbox.py      # 144 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
+python arcgis_pro_performance_analyser.py --self-test   # 828 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 

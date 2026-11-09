@@ -39,6 +39,10 @@ without leaving the application, and it says so on the page.
 Nothing here signs in to anything and no host is contacted unless you name one.
 The in-Pro workstation tool never changes machine state: AP-01 belongs to the
 command-line run with Pro closed, and the former AP-02 GPU change is retired.
+Repairs, project recovery copies and add-in quarantine are also outside this
+tool, on purpose: they need Pro closed. Double-clicking
+Diagnostiquer_ArcGIS_Pro.bat now opens a numbered menu for them, so an operator
+who does not remember a flag is not left believing the features are missing.
 Only an explicit selected-project recovery mode can write here, and it writes
 a new copy only.
 """
@@ -415,7 +419,14 @@ class Diagnose(object):
                "<p><b>Exemple</b> : laissez ce paramètre désactivé ici. Pour "
                "un cache à reconstruire, fermez Pro et utilisez "
                "<code>python arcgis_pro_performance_analyser.py --apply</code> "
-               "après avoir lu le diagnostic.</p>")
+               "après avoir lu le diagnostic.</p>"
+               "<p><b>Menu</b> : hors de Pro, double-cliquez sur "
+               "<code>Diagnostiquer_ArcGIS_Pro.bat</code> pour retrouver les "
+               "actions sous forme de choix numérotés : 1 diagnostic en "
+               "lecture seule, 2 correctif AP-01, 3 copie de projet, "
+               "4 quarantaine d'un add-in, 5 restauration. Chaque choix "
+               "exécute exactement la même commande que les options en ligne "
+               "de commande.</p>")
 
         html_out = arcpy.Parameter(
             displayName="Rapport HTML",

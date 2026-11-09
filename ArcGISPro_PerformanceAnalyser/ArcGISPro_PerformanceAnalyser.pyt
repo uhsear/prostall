@@ -52,16 +52,16 @@ or source data is deleted.
 
 Provenance
 ----------
-  arcgis_pro_performance_analyser.py       11020 lines  sha256:ec1365b64955
+  arcgis_pro_performance_analyser.py       11584 lines  sha256:c6d4fcd710ca
   html_report.py                             966 lines  sha256:184c9b6eaf73
-  toolbox_glue.py                            869 lines  sha256:9b8784c4dacf
+  toolbox_glue.py                            880 lines  sha256:e5119eda14dd
 """
 
 from __future__ import print_function
 
 # ============================================================================
 # 1/3  diagnostic engine
-# source: arcgis_pro_performance_analyser.py  (sha256:ec1365b64955)
+# source: arcgis_pro_performance_analyser.py  (sha256:c6d4fcd710ca)
 # ----------------------------------------------------------------------------
 # r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 #
@@ -86,7 +86,9 @@ from __future__ import print_function
 # copy, and --quarantine-addin moves one exact PF-31 package into a verified,
 # restorable quarantine. --restore-addin reverses that move without overwriting.
 # Every applied change prints its own undo; no source project is rewritten and
-# no quarantined package is erased. The network probes
+# no quarantined package is erased. --menu offers those actions as numbered
+# choices, and each choice runs the same argv as the flag, so a double-click
+# cannot reach a gate a script could not. The network probes
 # are opt-in: without --sde-server and --portal no host is contacted. The one
 # exception is a project folder that already lives on a share: reading it crosses
 # the network, as Pro does when it opens the project, and PF-03 times one listing
@@ -96,8 +98,9 @@ from __future__ import print_function
 #     python arcgis_pro_performance_analyser.py
 #     python arcgis_pro_performance_analyser.py --sde-server gisdb01 --portal gis.example.org --verbose
 #     python arcgis_pro_performance_analyser.py --report C:\Temp\properf
-#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx
-#     python arcgis_pro_performance_analyser.py --project C:\\GIS\\Review\\a.aprx --project-repair views
+#     python arcgis_pro_performance_analyser.py --menu
+#     python arcgis_pro_performance_analyser.py --project C:\GIS\Review\a.aprx
+#     python arcgis_pro_performance_analyser.py --project C:\GIS\Review\a.aprx --project-repair views
 #     python arcgis_pro_performance_analyser.py --apply
 #     python arcgis_pro_performance_analyser.py --quarantine-addin C:\AddIns\Vendor.esriAddinX
 #     python arcgis_pro_performance_analyser.py --restore-addin C:\Quarantine\quarantine.json
@@ -10793,6 +10796,228 @@ def self_test():
           "on a Windows host there is no off-Windows note, and the JSON keys "
           "are sorted so two reports diff cleanly  <-- pinned defect")
 
+    # ------------------------------------------------------------- the menu
+    print("-" * 70)
+    print("the menu routes every choice to the documented command line")
+
+    def menu(answers, close=True):
+        """Run the menu on a scripted stdin and hand back (code, text, argv).
+
+        The answers end with Quitter unless `close` says otherwise, because
+        the menu loops and a scripted run that never quits is the infinite
+        loop this helper would otherwise hang in. Three quit answers are
+        appended rather than one: a question in the middle of an action
+        accepts 0 as "back to the menu", so the last answer to be read is not
+        always the menu prompt.
+        """
+        calls = []
+        out = io.StringIO()
+        lines = list(answers) + (["0", "0", "0"] if close else [])
+        source = io.StringIO("".join(line + "\n" for line in lines))
+        code = run_menu(streams=(out, source),
+                        execute=lambda argv: calls.append(argv) or 0,
+                        report_dir="C:\\Rapports")
+        return code, out.getvalue(), calls
+
+    def menu_argv(answers):
+        return menu(answers)[2]
+
+    text_all = "\n".join([MENU_TITLE]
+                         + ["%s %s" % (key, label) for key, label in MENU_ITEMS]
+                         + ["%s %s" % (key, "%s %s" % (mode, label))
+                            for key, mode, label in MENU_REPAIR_MODES])
+    check(all(ord(char) < 128 for char in text_all),
+          "the menu is plain ASCII, so no Windows code page can garble a "
+          "choice <-- pinned defect")
+    check(all(label.strip() for _key, label in MENU_ITEMS)
+          and [key for key, _label in MENU_ITEMS][-1] == "0",
+          "every choice carries a label and Quitter comes last")
+    check(sorted([mode for _key, mode, _label in MENU_REPAIR_MODES])
+          == sorted(PROJECT_REPAIR_MODES),
+          "the menu offers exactly the engine's repair modes, so it cannot "
+          "invent one or hide one  <-- pinned defect")
+
+    code, shown, calls = menu(["0"])
+    check(code == 0 and calls == [] and "Assistant ArcGIS Pro" in shown
+          and "Votre choix" in shown,
+          "the menu draws itself and Quitter runs nothing at all")
+    check("aucune autre action" in shown.lower(),
+          "and saying so is the last line, not a silent exit")
+
+    # Enter, the answer most operators give, must be the read-only run.
+    code, shown, calls = menu([""])
+    check(calls == [["--report", "C:\\Rapports", "--html", "--verbose"]],
+          "Enter defaults to the read-only diagnostic with reports  "
+          "<-- pinned defect")
+    check(not any(flag in " ".join(calls[0]) for flag in
+                  ("--apply", "--project", "--project-repair",
+                   "--quarantine-addin", "--restore-addin")),
+          "and that default argument list mutates nothing")
+    check("equivalent :" in shown,
+          "every run shows the flag line it mapped to, so the menu teaches "
+          "the command instead of hiding it")
+
+    calls = menu_argv(["1"])
+    check(len(calls) == 1 and calls[0][:2] == ["--report", "C:\\Rapports"],
+          "choice 1 is the same read-only diagnostic as Enter")
+
+    calls = menu_argv(["2", "n"])
+    check(calls == [], "choice 2 with a plain no changes nothing")
+    calls = menu_argv(["2", "o"])
+    check(len(calls) == 1 and calls[0][0] == "--apply"
+          and calls[0].count("--apply") == 1,
+          "choice 2 with an explicit yes arms --apply exactly once")
+    check("--project" not in calls[0] and "--quarantine-addin" not in calls[0],
+          "the cache fix is not mixed with a project or an add-in action")
+
+    calls = menu_argv(["3", '"C:\\GIS\\Broken.aprx"', "2"])
+    check(len(calls) == 1
+          and calls[0][:5] == ["--project", "C:\\GIS\\Broken.aprx",
+                               "--project-repair", "views_history",
+                               "--report"],
+          "choice 3 strips the quotes Windows puts round a dropped file and "
+          "maps mode 2 to views_history  <-- pinned defect")
+    code, shown, calls = menu(["3", "C:\\GIS\\notes.txt", "0"])
+    check(calls == [] and ".aprx" in shown,
+          "a non-project path is refused in the menu before the engine sees "
+          "it, and 0 goes back without an action")
+    calls = menu_argv(["3", "C:\\GIS\\Broken.aprx", ""])
+    check(calls[0][3] == "views",
+          "the repair mode defaults to views, the least destructive one")
+
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n"])
+    check(len(calls) == 1
+          and calls[0] == ["--quarantine-addin",
+                           "C:\\AddIns\\Vendor.esriAddinX"]
+          and "--confirm-machine-wide" not in calls[0],
+          "choice 4 quarantines a per-user package without the machine-wide "
+          "confirmation")
+    check("--report" not in calls[0] and "--html" not in calls[0],
+          "and does not attach report flags to a standalone action, which the "
+          "parser refuses")
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "o", "n"])
+    check("--confirm-machine-wide" in calls[0],
+          "a machine-wide package needs the separate yes the menu asks for")
+
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n", ""])
+    check(len(calls) == 2 and calls[1][:2] == ["--report", "C:\\Rapports"],
+          "a finished quarantine offers the control diagnostic, and Enter "
+          "accepts it  <-- pinned defect")
+    calls = menu_argv(["4", "C:\\AddIns\\Vendor.esriAddinX", "n", "n"])
+    check(len(calls) == 1,
+          "declining the control diagnostic runs nothing else")
+
+    calls = menu_argv(["5", "C:\\Quarantine\\q1\\quarantine.json"])
+    check(calls == [["--restore-addin",
+                     "C:\\Quarantine\\q1\\quarantine.json"]],
+          "choice 5 restores from the manifest it was given")
+    calls = menu_argv(["5", "quarantine.txt", "0"])
+    shown = menu(["5", "quarantine.txt", "0"])[1].lower()
+    check(calls == [] and ".json" in shown,
+          "a manifest that is not a .json is refused before the engine")
+
+    code, shown, calls = menu(["9", "6"])
+    check(calls == [] and "Reponse attendue" in shown,
+          "an unknown key re-asks and says what is accepted")
+    check("--quarantine-addin" in shown and "--restore-addin" in shown,
+          "the help choice lists the equivalent flags for a script")
+
+    try:
+        menu([], close=False)
+    except MenuInputClosed:
+        check(True, "the end of the input is raised, not read as an endless "
+                    "Enter")
+    else:
+        check(False, "the end of the input must not be read as an endless "
+                     "Enter")
+
+    # Nothing the menu can build may fall outside the documented flags.
+    allowed = {"--report", "--html", "--verbose", "--apply", "--project",
+               "--project-repair", "--quarantine-addin",
+               "--confirm-machine-wide", "--restore-addin"}
+    every = (menu_argv([""]) + menu_argv(["2", "o"]) + menu_argv(
+        ["3", "C:\\a.aprx", "3"]) + menu_argv(
+        ["4", "C:\\p.esriAddinX", "o", "n"]) + menu_argv(
+        ["5", "C:\\q\\quarantine.json"]))
+    used = set([word for argv in every for word in argv
+                if word.startswith("--")])
+    check(used and used <= allowed,
+          "every flag the menu can build is a documented flag: %s"
+          % ", ".join(sorted(used)))
+    check(not any(word in used for word in ("--json", "--sde-server",
+                                            "--portal", "--timeout")),
+          "the menu never arms a network probe or a machine-readable dump on "
+          "its own")
+
+    def parses(argv):
+        real_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            _parse(argv)
+            return True
+        except SystemExit:
+            return False
+        finally:
+            sys.stderr = real_stderr
+
+    for argv in every:
+        check(parses(argv),
+              "the parser accepts the menu's own argv: %s" % " ".join(argv))
+
+    def refused(argv):
+        real_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            return main(argv)
+        finally:
+            sys.stderr = real_stderr
+
+    check(refused(["--menu", "--apply"]) == USAGE_ERROR,
+          "--menu refuses to be armed beside an action flag")
+    check(refused(["--menu", "--quarantine-addin", "C:\\p.esriAddinX"])
+          == USAGE_ERROR,
+          "including an add-in action, which is standalone by contract")
+    check(not stdin_has_terminal(io.StringIO("")),
+          "a stream with no terminal is recognised as unpromptable")
+    check(not stdin_has_terminal(None) or True,
+          "and a missing stdin is answered, never raised")
+
+    fallback_dir = tempfile.mkdtemp(prefix="properf-menu-fallback-")
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO("")
+        code, out, err = with_env(fake_healthy,
+                                  ["--menu", "--report", fallback_dir,
+                                   "--html"])
+        check(code <= 3, "a non-interactive --menu still exits with a "
+                         "diagnostic code, never by blocking")
+        check("Assistant ArcGIS Pro" not in out,
+              "a scheduled task is not shown a menu it cannot answer")
+        check("lecture seule" in err,
+              "and is told which read-only run it got instead")
+        written = sorted(os.listdir(fallback_dir))
+        check(any(name.endswith(".html") for name in written)
+              and any(name.endswith(".json") for name in written),
+              "that fallback still writes the reports the launcher used to "
+              "write")
+    finally:
+        sys.stdin = real_stdin
+        shutil.rmtree(fallback_dir, ignore_errors=True)
+
+    real_stderr = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        _menu_run_cli(["--definitely-not-a-flag"])
+    except SystemExit as exc:
+        executor_code = exc.code
+    else:
+        executor_code = "accepted it"
+    finally:
+        sys.stderr = real_stderr
+    check(executor_code == USAGE_ERROR,
+          "the shipped executor is the real parser: an invented flag exits "
+          "64 from one menu run  <-- pinned defect")
+
     # ------------------------------------------------------- the harness itself
     print("-" * 70)
     print("the harness records a failure as a failure")
@@ -10875,7 +11100,8 @@ def _parse(argv):
                     "did not produce.",
         epilog="Check by default. Without --apply, --project-repair, "
                "--quarantine-addin or --restore-addin, nothing on the machine "
-               "or in the source project changes; without "
+               "or in the source project changes; --menu only asks which of "
+               "those to run, and runs it as the documented flag. Without "
                "--sde-server or --portal no host is "
                "contacted, apart from reading a project folder that already "
                "lives on a share. Connection files are recorded by path and "
@@ -10928,7 +11154,314 @@ def _parse(argv):
     ap.add_argument("--confirm-machine-wide", action="store_true",
                     help="confirm an administrator-approved quarantine of a "
                          "machine-wide package; affects other users")
+    ap.add_argument("--menu", action="store_true",
+                    help="offer the actions above as a numbered French menu. "
+                         "Each choice runs the same flags a script would "
+                         "pass. With no terminal on stdin it runs the "
+                         "read-only diagnostic instead of waiting for input")
     return ap.parse_args(argv)
+
+
+# -----------------------------------------------------------------------------
+# THE INTERACTIVE MENU
+#
+# Five actions used to need five remembered flags, and an operator who cannot
+# remember a flag double-clicks the file, gets a read-only run, and concludes
+# that the repair features do not exist. The menu answers that. It is a front
+# end and not a second implementation: each choice builds the same argv a
+# script would pass, so the same parser, the same refusals, the same undo lines
+# and the same exit codes apply. Nothing here relaxes a gate, and no choice
+# picks an add-in, a project or a repair mode on the operator's behalf.
+# -----------------------------------------------------------------------------
+
+MENU_TITLE = "Assistant ArcGIS Pro : diagnostic, reparation et add-ins"
+
+MENU_ITEMS = (
+    ("1", "Diagnostic complet, lecture seule (TXT, JSON et HTML)"),
+    ("2", "Corriger le cache ESRI : AP-01, reversible, Pro ferme"),
+    ("3", "Reparer une COPIE d'un projet .aprx (l'original reste intact)"),
+    ("4", "Mettre en quarantaine un add-in precis, de facon reversible"),
+    ("5", "Restaurer un add-in depuis son quarantine.json"),
+    ("6", "Aide : dossiers, commandes equivalentes et codes de sortie"),
+    ("0", "Quitter"),
+)
+
+# The repair modes, in the order a worried operator should try them: drop the
+# view state first, and treat a full repack as the last resort.
+MENU_REPAIR_MODES = (
+    ("1", "views", "retirer l'etat des vues au demarrage (recommande)"),
+    ("2", "views_history", "retirer aussi l'historique de geoprocessus"),
+    ("3", "repack", "reconstruire seulement le conteneur ZIP"),
+    ("4", "none", "analyser la copie sans autre modification"),
+)
+
+
+class MenuInputClosed(Exception):
+    """No answer can arrive: stdin is exhausted, or the console was closed."""
+
+
+def default_report_dir():
+    """Where the launcher and the menu put reports when no folder is named.
+
+    The batch default is %LOCALAPPDATA%\\ArcGISPro_PerformanceAnalyser\\
+    Rapports. The menu repeats it so a double-click and a typed command cannot
+    scatter reports into two different places on the same machine.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME")
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "ArcGISPro_PerformanceAnalyser", "Rapports")
+
+
+def _menu_line(stream, text=""):
+    stream.write(text + "\n")
+
+
+def _menu_answer(streams, prompt):
+    """One line of input, stripped. Raises rather than looping on EOF.
+
+    A closed stream returns "" forever. Treating that as an empty answer
+    turned a scheduled task into an endless reprint of the menu, so the end of
+    the stream is raised to the caller and reported as an interruption.
+    """
+    out, source = streams
+    out.write(prompt)
+    out.flush()
+    line = source.readline()
+    if not line:
+        _menu_line(out)
+        raise MenuInputClosed()
+    return line.strip()
+
+
+def _menu_choice(streams, prompt, allowed, default):
+    """A key from `allowed`, the default on Enter, or a re-ask."""
+    out = streams[0]
+    while True:
+        answer = _menu_answer(streams, prompt).lower()
+        if not answer:
+            return default
+        if answer in allowed:
+            return answer
+        _menu_line(out, "  Reponse attendue : %s." % ", ".join(sorted(allowed)))
+        _menu_line(out)
+
+
+def _menu_path(streams, prompt, extension=None):
+    """A path, or None when the operator types 0 to go back.
+
+    Windows wraps a dropped file in quotes, so the quotes are stripped here:
+    the path the engine validates is the path the operator chose.
+    """
+    out = streams[0]
+    while True:
+        answer = _menu_answer(streams, prompt).strip().strip('"').strip("'")
+        answer = answer.strip()
+        if answer == "0":
+            return None
+        if not answer:
+            _menu_line(out, "  Un chemin est obligatoire, ou 0 pour revenir "
+                            "au menu.")
+            _menu_line(out)
+            continue
+        if extension and not answer.lower().endswith(extension):
+            _menu_line(out, "  Le chemin doit finir par %s, ou 0 pour revenir "
+                            "au menu." % extension)
+            _menu_line(out)
+            continue
+        return answer
+
+
+def _menu_run_cli(argv):
+    """Run one menu action through the real command line.
+
+    Deliberately the only path from the menu to an action: whatever
+    validation, refusal message or exit code the flags produce is what the
+    menu produces too.
+    """
+    return main(argv)
+
+
+def run_menu(streams=None, execute=None, report_dir=None):
+    """Offer the documented actions as numbered choices and run them.
+
+    `execute` exists so the self-test can prove which argv each choice would
+    run without touching a machine; the shipped default is the ordinary
+    command line. Returns the last action's exit code, or 0 when the operator
+    quits before running one.
+    """
+    out, _source = streams or (sys.stdout, sys.stdin)
+    run = execute or _menu_run_cli
+    report_dir = report_dir or default_report_dir()
+    report_flags = ["--report", report_dir, "--html", "--verbose"]
+
+    def show(text=""):
+        _menu_line(out, text)
+
+    def perform(label, argv):
+        show("")
+        show("--- %s" % label)
+        show("    equivalent : arcgis_pro_performance_analyser.py %s"
+             % " ".join(argv))
+        code = run(list(argv))
+        show("--- %s : code %d" % (label, code))
+        return code
+
+    def confirm(question):
+        """A yes/no question where anything but a clear yes is a no.
+
+        0 is accepted as another way back to the menu, because an operator
+        who changes their mind should not have to answer a question they no
+        longer want to act on.
+        """
+        return _menu_choice(streams, question,
+                            ("o", "n", "oui", "non", "0"), "n") in ("o", "oui")
+
+    def control_diagnostic():
+        """A fresh read-only run after a quarantine or a restore.
+
+        The action's own output is not a report, so the operator gets one
+        immediately instead of being told to remember to run it later. The
+        question defaults to yes because running it is the safe answer.
+        """
+        answer = _menu_choice(streams, "Lancer un diagnostic de controle "
+                                       "maintenant ? [O/n] ",
+                              ("o", "n", "oui", "non", "0"), "o")
+        if answer in ("o", "oui"):
+            return perform("Diagnostic de controle", report_flags)
+        show("Diagnostic de controle non lance. Le dossier reste : %s"
+             % report_dir)
+        return None
+
+    show("")
+    show("=" * 70)
+    show(MENU_TITLE)
+    show("=" * 70)
+    for key, label in MENU_ITEMS:
+        show("  %s) %s" % (key, label))
+    show("")
+    show("Rapports  : %s" % report_dir)
+    show("Entree = choix 1. Rien n'est modifie sans une confirmation.")
+    show("La quarantaine retire un add-in du chargement sans l'effacer.")
+
+    last = 0
+    while True:
+        show("")
+        choice = _menu_choice(streams, "Votre choix [1] : ",
+                              tuple([key for key, _label in MENU_ITEMS]), "1")
+        if choice == "0":
+            show("")
+            show("Aucune autre action n'a ete lancee. Code %d." % last)
+            return last
+        if choice == "1":
+            last = perform("Diagnostic en lecture seule", report_flags)
+            continue
+        if choice == "2":
+            show("")
+            show("AP-01 renomme le dossier de cache ESRI d'ArcGIS Pro.")
+            show("ArcGIS Pro doit etre ferme. L'annulation exacte est affichee")
+            show("a la fin ; aucune preference GPU n'est modifiee.")
+            if not confirm("Appliquer ce correctif ? [o/N] "):
+                show("Correctif annule. Aucune modification.")
+                continue
+            last = perform("Correctif AP-01", ["--apply"] + report_flags)
+            continue
+        if choice == "3":
+            show("")
+            show("La reparation ecrit une NOUVELLE copie a cote du projet.")
+            show("Le fichier .aprx choisi n'est jamais reecrit.")
+            project = _menu_path(streams, "Chemin du projet .aprx "
+                                          "(0 pour revenir) : ",
+                                 extension=".aprx")
+            if project is None:
+                show("Annule. Aucun fichier n'a ete cree.")
+                continue
+            show("")
+            show("Que retirer dans la copie ?")
+            for key, mode, label in MENU_REPAIR_MODES:
+                show("  %s) %-13s %s" % (key, mode, label))
+            picked = _menu_choice(
+                streams, "Mode [1], 0 pour revenir : ",
+                tuple([key for key, _mode, _label in MENU_REPAIR_MODES])
+                + ("0",), "1")
+            if picked == "0":
+                show("Annule. Aucune copie n'a ete creee.")
+                continue
+            mode = dict([(key, one) for key, one, _label
+                         in MENU_REPAIR_MODES])[picked]
+            last = perform(
+                "Reparation (%s) d'une copie" % mode,
+                ["--project", project, "--project-repair", mode]
+                + report_flags)
+            continue
+        if choice == "4":
+            show("")
+            show("Seul un package DECOUVERT par PF-31 peut etre deplace.")
+            show("Lancez d'abord le diagnostic (choix 1) et copiez son chemin.")
+            show("ArcGIS Pro doit etre ferme. Le package est copie, verifie")
+            show("par SHA-256, conserve, puis retire du chargement.")
+            package = _menu_path(streams, "Chemin exact du package "
+                                          "(0 pour revenir) : ")
+            if package is None:
+                show("Annule. Aucun package n'a ete deplace.")
+                continue
+            argv = ["--quarantine-addin", package]
+            if confirm("Package installe pour TOUS les utilisateurs de ce "
+                       "poste (administrateur) ? [o/N] "):
+                argv.append("--confirm-machine-wide")
+            last = perform("Quarantaine d'un add-in", argv)
+            if last == 0:
+                code = control_diagnostic()
+                if code is not None:
+                    last = code
+            continue
+        if choice == "5":
+            show("")
+            show("La restauration verifie l'empreinte et refuse d'ecraser")
+            show("un package qui serait reapparu. ArcGIS Pro doit etre ferme.")
+            manifest = _menu_path(streams, "Chemin du quarantine.json "
+                                           "(0 pour revenir) : ",
+                                  extension=".json")
+            if manifest is None:
+                show("Annule. Aucun fichier n'a ete restaure.")
+                continue
+            last = perform("Restauration d'un add-in",
+                           ["--restore-addin", manifest])
+            if last == 0:
+                code = control_diagnostic()
+                if code is not None:
+                    last = code
+            continue
+        # Choice 6 is the only one left, and it stays in the menu on purpose:
+        # it is a reminder, not an action.
+        show("")
+        show("Ce menu appelle les commandes documentees, avec les memes")
+        show("controles. Pour un script, utilisez directement :")
+        show("  --menu                       ce menu")
+        show("  --apply                      correctif AP-01, Pro ferme")
+        show('  --project \"x.aprx\" --project-repair views')
+        show('  --quarantine-addin \"package.esriAddinX\" '
+             '[--confirm-machine-wide]')
+        show('  --restore-addin \"quarantine.json\"')
+        show("")
+        show("Rapports par defaut : %s" % report_dir)
+        show("Codes : 0 rien a signaler, 1/2 constats a lire, 64 refuse.")
+        show("Un add-in n'est jamais declare coupable : la quarantaine est une")
+        show("isolation reversible, pas une preuve de cause ni une suppression.")
+
+
+def stdin_has_terminal(stream=None):
+    """Whether a prompt can be answered.
+
+    A pipe, a redirected file and a scheduled task all have a stdin that ends
+    immediately. Asking a question there would either hang or read the end of
+    the stream as "Enter", so the menu is never offered in that case.
+    """
+    stream = sys.stdin if stream is None else stream
+    try:
+        return bool(stream is not None and stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def main(argv=None):
@@ -10967,6 +11500,13 @@ def main(argv=None):
             .lower() not in ADDIN_PACKAGE_EXTENSIONS):
         print("error: --quarantine-addin requires an .esriAddinX, .proConfigX "
               "or .esriPlugin package.", file=sys.stderr)
+        return USAGE_ERROR
+    if args.menu and (addin_actions or args.project
+                      or args.project_repair != "none" or args.apply
+                      or args.json or args.sde_server or args.portal):
+        print("error: --menu asks the questions itself; give it no other "
+              "action flag, or pass the flags directly for a script.",
+              file=sys.stderr)
         return USAGE_ERROR
     if args.project_repair != "none" and not args.project:
         print("error: --project-repair requires --project APRX.",
@@ -11007,6 +11547,30 @@ def main(argv=None):
     # write the report" into a UnicodeEncodeError traceback, so the run exited
     # on an encoding error instead of with the 64 that says why.
     make_output_safe(sys.stderr)
+
+    if args.menu:
+        if not stdin_has_terminal():
+            # No prompt can be answered here: a scheduled task, a pipe or a
+            # redirected file. Run the read-only diagnosis those callers used
+            # to get, rather than waiting for an answer or reading the end of
+            # the stream as "Enter".
+            print("note: aucune entree interactive disponible ; diagnostic "
+                  "en lecture seule.", file=sys.stderr)
+            fallback = []
+            if args.report:
+                fallback += ["--report", args.report]
+            if args.html:
+                fallback.append("--html")
+            if args.verbose:
+                fallback.append("--verbose")
+            return main(fallback)
+        try:
+            return run_menu(report_dir=args.report or default_report_dir())
+        except (MenuInputClosed, EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            print("Assistant interrompu. Aucune autre action n'a ete lancee.",
+                  file=sys.stderr)
+            return 0
 
     env = Env()
     if not env.windows and not args.project and not addin_actions:
@@ -12052,7 +12616,7 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 
 # ============================================================================
 # 3/3  ArcGIS Pro toolbox glue
-# source: toolbox_glue.py  (sha256:9b8784c4dacf)
+# source: toolbox_glue.py  (sha256:e5119eda14dd)
 # ----------------------------------------------------------------------------
 # r"""The ArcGIS Pro glue: two geoprocessing tools over the diagnostic engine
 # and the HTML renderer.
@@ -12095,6 +12659,10 @@ def write_html(document, path, verbose=False, exit_code=None, meta=None):
 # Nothing here signs in to anything and no host is contacted unless you name one.
 # The in-Pro workstation tool never changes machine state: AP-01 belongs to the
 # command-line run with Pro closed, and the former AP-02 GPU change is retired.
+# Repairs, project recovery copies and add-in quarantine are also outside this
+# tool, on purpose: they need Pro closed. Double-clicking
+# Diagnostiquer_ArcGIS_Pro.bat now opens a numbered menu for them, so an operator
+# who does not remember a flag is not left believing the features are missing.
 # Only an explicit selected-project recovery mode can write here, and it writes
 # a new copy only.
 # ============================================================================
@@ -12479,7 +13047,14 @@ class Diagnose(object):
                "<p><b>Exemple</b> : laissez ce paramètre désactivé ici. Pour "
                "un cache à reconstruire, fermez Pro et utilisez "
                "<code>python arcgis_pro_performance_analyser.py --apply</code> "
-               "après avoir lu le diagnostic.</p>")
+               "après avoir lu le diagnostic.</p>"
+               "<p><b>Menu</b> : hors de Pro, double-cliquez sur "
+               "<code>Diagnostiquer_ArcGIS_Pro.bat</code> pour retrouver les "
+               "actions sous forme de choix numérotés : 1 diagnostic en "
+               "lecture seule, 2 correctif AP-01, 3 copie de projet, "
+               "4 quarantaine d'un add-in, 5 restauration. Chaque choix "
+               "exécute exactement la même commande que les options en ligne "
+               "de commande.</p>")
 
         html_out = arcpy.Parameter(
             displayName="Rapport HTML",

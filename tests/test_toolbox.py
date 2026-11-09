@@ -478,10 +478,29 @@ batch = io.open(os.path.join(ROOT, "Diagnostiquer_ArcGIS_Pro.bat"),
                 encoding="utf-8").read()
 python_lines = [line.strip() for line in batch.splitlines()
                 if '"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%"' in line]
-check(len(python_lines) == 4
+check(len(python_lines) == 5
       and any('--report "%OUT%" --html --verbose %ACTION_FLAG%' in line
               for line in python_lines),
       "the default diagnostic writes TXT, JSON and HTML in verbose mode")
+check(any('--menu --report "%OUT%" --html' in line for line in python_lines)
+      and 'if "%~1"=="" goto MENU_MODE' in batch
+      and 'set "MODE=menu"' in batch,
+      "a double-click lands on the numbered menu, in the same report folder")
+check(len([name for name in os.listdir(ROOT)
+           if name.lower().endswith(".bat")]) == 1,
+      "one launcher covers every action: the operator does not choose "
+      "between batch files  <-- pinned defect")
+check("set /p" not in batch.lower(),
+      "the batch does not reimplement the prompts: the menu lives in the "
+      "engine, where the self-test can run it  <-- pinned defect")
+check('if /i "%MODE%"=="menu" goto RUN_MENU' in batch
+      and "if %RC% LEQ 3 goto MENU_OK" in batch,
+      "the menu mode has its own exit handling and never falls through to a "
+      "diagnostic tail it did not run")
+check(any(line.strip() == 'set "MODE=diagnose"' for line in batch.splitlines())
+      and 'if /i "%MODE%"=="apply" set "ACTION_FLAG=--apply"' in batch,
+      "the menu did not take over the flag modes: they still arm --apply "
+      "only when asked")
 check(all(line.startswith('"%PYTHON%" %PYTHON_ARGS% "%SCRIPT%"')
           for line in python_lines),
       "the Python executable is quoted, including Pro's Program Files path")
