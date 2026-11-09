@@ -3640,13 +3640,182 @@ def parse_startup_package(path, kind, payload):
     return record
 
 
+# Runtime libraries ArcGIS Pro loads itself. A startup package that ships its
+# own copy can win the assembly-binding race and take the .NET runtime down
+# with it - which is what a KERNELBASE.dll or coreclr.dll fault module looks
+# like from the outside. An indicator, never a verdict.
+PROBLEM_PRONE_ASSEMBLIES = (
+    "newtonsoft.json.dll",
+    "microsoft.bcl.asyncinterfaces.dll",
+    "microsoft.extensions.dependencyinjection.abstractions.dll",
+    "microsoft.identitymodel.abstractions.dll",
+    "microsoft.identitymodel.jsonwebtokens.dll",
+    "microsoft.identitymodel.logging.dll",
+    "microsoft.identitymodel.tokens.dll",
+    "system.text.json.dll",
+    "system.runtime.compilerservices.unsafe.dll",
+    "system.threading.tasks.extensions.dll",
+)
+
+
+def stamp_seconds(text):
+    """Epoch seconds for one of this tool's stamps, or None if it is not one."""
+    bits = [int(number) for number in re.findall(r"\d+", str(text or ""))[:6]]
+    if len(bits) < 3:
+        return None
+    bits += [0] * (6 - len(bits))
+    try:
+        return calendar.timegm(tuple(bits) + (0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+
+
+def addin_candidates(records, crash_modules=None, pro_version=None,
+                     crash_first=None, modified_window_days=45):
+    """Rank the startup packages a crash could have come from, with reasons.
+
+    The order is evidence, not a verdict, and the report says so. A package
+    scores for a fault module it ships, for having been installed or updated
+    shortly before the first recorded crash, for targeting an older release
+    than the installed one, and for bundling runtime libraries Pro also loads.
+    Every one of those is a lead an operator can test; none of them is proof,
+    which is why the isolation is still one package at a time.
+    """
+    crash_names = set(ntpath.basename(name or "").lower()
+                      for name in (crash_modules or []) if name)
+    installed = _version_pair(pro_version)
+    crash_at = stamp_seconds(crash_first)
+    ranked = []
+    for record in records:
+        score = 0
+        reasons = []
+        shipped = set(name.lower() for name in record.get("assemblies") or [])
+        matched = sorted(shipped & crash_names)
+        if matched:
+            score += 40
+            reasons.append("ships the fault module named by Application Error "
+                           "1000: %s" % ", ".join(matched))
+        modified = stamp_seconds(record.get("modified"))
+        if crash_at is not None and modified is not None:
+            days = (crash_at - modified) / 86400.0
+            if 0 <= days <= modified_window_days:
+                score += 20
+                reasons.append("installed or updated %d day(s) before the "
+                               "first recorded crash (%s)"
+                               % (round(days), crash_first))
+        target = _version_pair(record.get("desktop_version"))
+        if target and installed and (target[0] < installed[0]
+                                     or (target[0] == installed[0]
+                                         and target[1] < installed[1])):
+            score += 10
+            reasons.append("targets %s, an older release than the installed "
+                           "Pro %s" % (record.get("desktop_version"),
+                                       pro_version))
+        bundled = sorted(shipped & set(PROBLEM_PRONE_ASSEMBLIES))
+        if bundled:
+            score += 8
+            reasons.append("bundles runtime libraries Pro also loads: %s"
+                           % ", ".join(bundled))
+        if record.get("warnings"):
+            score += 5
+            reasons.append("%d structural or compatibility indicator(s) in "
+                           "this inventory" % len(record["warnings"]))
+        ranked.append({"record": record, "score": score, "reasons": reasons})
+    ranked.sort(key=lambda item: (-item["score"],
+                                  (item["record"].get("name") or "").lower()))
+    for position, item in enumerate(ranked, 1):
+        item["rank"] = position
+    return ranked
+
+
+def _isolation_steps(ranked):
+    """The ordered isolation plan, in the words an operator can follow."""
+    steps = [
+        "Fermez ArcGIS Pro sur le poste concerné. Le test /disableaddins a "
+        "déjà prouvé que le problème vient du code chargé au démarrage, pas "
+        "du projet : réparer le projet ou réinstaller ArcGIS Pro ne changera "
+        "rien.",
+    ]
+    if not ranked:
+        steps.append("Le test /disableaddins change bien le résultat, mais "
+                     "aucun package n'a été trouvé dans les dossiers lisibles : "
+                     "lisez le gestionnaire des add-ins d'ArcGIS Pro et la "
+                     "configuration gérée par le service informatique.")
+        return steps
+    for position, item in enumerate(ranked[:4], 1):
+        record = item["record"]
+        verb = ("Commencez par isoler" if position == 1 else
+                "Puis, seulement si le plantage persiste, isolez")
+        steps.append(
+            "%s %s (version %s), UN SEUL à la fois. Menu, choix 4, ou "
+            "--quarantine-addin \"%s\". Le package est copié, vérifié par "
+            "SHA-256 et conservé : jamais supprimé."
+            % (verb, record.get("name") or "<nom illisible>",
+               record.get("version") or "inconnue", record.get("path")))
+    steps.append("Relancez Pro normalement, sans /disableaddins, et refaites "
+                 "l'opération qui plantait : si le plantage revient, restaurez "
+                 "ce package avec --restore-addin et passez au suivant dans "
+                 "l'ordre ci-dessus.")
+    steps.append("Si un package isolé laisse Pro stable sur plusieurs "
+                 "démarrages, gardez-le en quarantaine et signalez-le à son "
+                 "éditeur avec le build PF-04 et le module défaillant de "
+                 "DL-13 ; demandez une version déclarée compatible avec ce "
+                 "build.")
+    steps.append("Ne désinstallez rien et ne supprimez aucun dossier de "
+                 "quarantaine tant que le dossier n'est pas clos : c'est la "
+                 "seule trace qui permet d'y revenir.")
+    return steps
+
+
 def decide_addins(records, coverage, pro_version, crash_modules=None,
-                  platform_readable=True):
-    """PF-31. Startup customisations, without calling presence a crash cause."""
+                  platform_readable=True, crash_first=None, isolated_ok=False):
+    """PF-31. Startup customisations, without calling presence a crash cause.
+
+    `isolated_ok` is the operator's own isolation test: Pro starts with
+    /disableaddins and fails with the add-ins loaded. That is real evidence
+    about WHERE the fault lives - in startup code - and none at all about
+    WHICH package carries it, so the check stops being an inventory and
+    becomes an ordered isolation plan, with the ranking labelled as a lead.
+    """
     lines = ["Offline inventory: no add-in code was loaded or extracted; "
              "digital signatures were not verified."]
     lines.extend("COVERAGE: %s" % reason for reason in coverage)
     if not platform_readable:
+        if isolated_ok:
+            # The operator's test does not need this platform: it says the
+            # fault is in startup code whether or not this host can list the
+            # packages. Reporting it as undetermined would bury the one fact
+            # that narrows the case.
+            return dict(
+                cid="PF-31", category="ArcGISPro", status="Warn",
+                dataloss=True,
+                title="Pro starts only without add-ins; the package inventory "
+                      "needs the affected Windows workstation",
+                observed=["OPERATOR EVIDENCE: ArcGIS Pro starts correctly with "
+                          "/disableaddins and crashes with the startup packages "
+                          "loaded, so the fault is in startup code.",
+                          "Add-in folders and packages are inspected on Windows "
+                          "only, so this host cannot name the packages."],
+                expected="A readable Windows add-in inventory, ordered so the "
+                         "first package can be isolated.",
+                impact="S6 and S3. The isolation test locates the fault; the "
+                       "inventory that names the candidates was not readable "
+                       "here.",
+                explanation="Le test /disableaddins est une observation qui ne "
+                            "dépend pas de cette machine : le problème vient du "
+                            "code chargé au démarrage. En revanche, la liste "
+                            "des packages ne peut être lue que sur le poste "
+                            "Windows concerné.",
+                impact_fr="Tant que le poste Windows n'a pas été analysé, aucun "
+                          "package ne peut être proposé à l'isolement, et les "
+                          "plantages continueront.",
+                steps=_isolation_steps([]),
+                verification="PF-31 doit lister les packages sur le poste "
+                             "Windows, puis un seul d'entre eux doit être isolé "
+                             "et testé.",
+                fix="Run the BAT launcher or CLI on the affected Windows "
+                    "workstation, in the user's own session, with "
+                    "--addins-isolated-ok.")
         return dict(cid="PF-31", category="ArcGISPro", status="Info",
                     measured=False, title="Startup add-ins and configurations",
                     observed="Add-in folders and packages are inspected on "
@@ -3725,6 +3894,26 @@ def decide_addins(records, coverage, pro_version, crash_modules=None,
                          % ", ".join(record["startup_modules"]))
         lines.extend("  NOTE: %s" % note for note in info)
         lines.extend("  RISK: %s" % warning for warning in warnings)
+    ranked = addin_candidates(records, crash_modules, pro_version, crash_first)
+    if isolated_ok:
+        evidence = ["OPERATOR EVIDENCE: ArcGIS Pro starts correctly with "
+                    "/disableaddins and crashes with the startup packages "
+                    "loaded. The fault is therefore in startup code, not in "
+                    "the project or the licence.",
+                    "This is evidence of WHERE, not of WHICH package: only "
+                    "isolating one package at a time can attribute it."]
+        if crash_first:
+            evidence.append("First recorded crash on this machine: %s, which "
+                            "dates the incident for the ranking below."
+                            % crash_first)
+        lines = evidence + lines
+    if ranked and (isolated_ok or any(item["score"] for item in ranked)):
+        lines = (["ISOLATION ORDER - a lead to test, one package at a time:"]
+                 + ["  %d. %s | score %d | %s"
+                    % (item["rank"], item["record"].get("path"), item["score"],
+                       "; ".join(item["reasons"]) or "no indicator measured")
+                    for item in ranked]
+                 + lines)
     if not records:
         if coverage:
             return dict(cid="PF-31", category="ArcGISPro", status="Info",
@@ -3735,6 +3924,33 @@ def decide_addins(records, coverage, pro_version, crash_modules=None,
                         fix="Read Settings > Add-In Manager and the folder "
                             "paths named in this check; do not treat an "
                             "incomplete inventory as no add-ins.")
+        if isolated_ok:
+            return dict(
+                cid="PF-31", category="ArcGISPro", status="Warn",
+                dataloss=True, title="Pro starts only without add-ins, but no "
+                "startup package was found in the readable folders",
+                observed=lines + ["No .esriAddinX, .proConfigX or .esriPlugin "
+                                  "package was found in the readable default/"
+                                  "well-known folders."],
+                expected="A readable inventory of every package the isolation "
+                         "test implicates.",
+                impact="S6 and S3. The isolation test says the fault is in "
+                       "startup code, and this inventory cannot name it.",
+                explanation="Le test /disableaddins change bien le résultat, "
+                            "donc le problème vient du code chargé au démarrage. "
+                            "Mais l'inventaire hors ligne ne voit aucun package : "
+                            "soit il est installé ailleurs, soit il est déployé "
+                            "par une configuration gérée.",
+                impact_fr="Les plantages continueront tant que le package "
+                          "responsable n'est pas identifié et retiré du "
+                          "chargement.",
+                steps=_isolation_steps([]),
+                verification="PF-31 doit lister le package responsable, ou le "
+                             "gestionnaire des add-ins d'ArcGIS Pro doit "
+                             "expliquer son emplacement.",
+                fix="Read Settings > Add-In Manager, and the managed "
+                    "configuration launch shortcut, because this offline "
+                    "inventory found no package in the readable folders.")
         return dict(cid="PF-31", category="ArcGISPro", status="Pass",
                     title="No startup add-in, configuration or plug-in found",
                     observed=lines + ["No .esriAddinX, .proConfigX or "
@@ -3746,6 +3962,47 @@ def decide_addins(records, coverage, pro_version, crash_modules=None,
                     fix="If /disableaddins still changes the result, inspect "
                         "Add-In Manager and any managed-configuration launch "
                         "shortcut; this inventory does not prove another cause.")
+    if isolated_ok:
+        first = ranked[0]["record"] if ranked else {}
+        return dict(
+            cid="PF-31", category="ArcGISPro", status="Warn", dataloss=True,
+            title="%d startup package(s); Pro starts with /disableaddins, so "
+                  "the crash is in startup code" % len(records),
+            observed=lines,
+            expected="One startup package identified and isolated, with the "
+                     "platform stable without /disableaddins.",
+            impact="S6 and S3. The isolation test places the fault in startup "
+                   "code. Which package carries it is still open.",
+            explanation="Le test /disableaddins prouve que le problème vient "
+                        "d'un add-in, d'une configuration ou d'un plug-in "
+                        "chargé au démarrage : sans eux, ArcGIS Pro démarre. "
+                        "Il ne dit pas encore lequel. L'ordre proposé ci-dessous "
+                        "classe les packages selon des indices mesurables "
+                        "(module défaillant, date d'installation, version "
+                        "ciblée, assemblies embarquées), pas selon une "
+                        "présomption.",
+            impact_fr="Chaque plantage en édition peut faire perdre le travail "
+                      "non enregistré. Isoler le bon package supprime la cause ; "
+                      "supprimer les add-ins au hasard fait perdre des outils "
+                      "sans rien prouver.",
+            steps=_isolation_steps(ranked),
+            verification="ArcGIS Pro doit démarrer et fonctionner sans "
+                         "/disableaddins, DL-13 ne doit plus enregistrer "
+                         "d'événement 1000 ou 1002, et PF-31 doit montrer le "
+                         "package attendu en quarantaine.",
+            fix="Isolate one package at a time with --quarantine-addin, in the "
+                "order printed above; restore it with --restore-addin if the "
+                "crash persists. Presence and ranking are leads, not proof.",
+            detail=("First package to isolate: %s | isolation order: %s"
+                    % (first.get("path"),
+                       "; ".join(item["record"].get("name") or "?"
+                                 for item in ranked)))
+            if ranked else
+            "No package could be ranked: the inventory was empty or "
+            "unreadable.",
+            kpi={"packages": len(records), "issues": issue_count,
+                 "crash_module_matches": crash_matches,
+                 "candidates_ranked": len(ranked)})
     return dict(
         cid="PF-31", category="ArcGISPro",
         status="Warn" if issue_count else "Info",
@@ -4133,11 +4390,14 @@ def discover_startup_packages(env):
 def probe_addins(env, facts):
     """Inventory every discovered startup package within explicit limits."""
     if not env.registry_readable():
-        return decide_addins([], [], None, platform_readable=False)
+        return decide_addins([], [], None, platform_readable=False,
+                             isolated_ok=bool(facts.get("isolated_ok")))
     records, coverage, _locations = discover_startup_packages(env)
     facts["addin_inventory"] = records
     return decide_addins(records, coverage, facts.get("pro_release"),
-                         facts.get("crash_modules"))
+                         facts.get("crash_modules"),
+                         crash_first=facts.get("crash_first"),
+                         isolated_ok=bool(facts.get("isolated_ok")))
 
 
 def probe_rendering(env, facts):
@@ -4299,6 +4559,13 @@ def probe_events(env, facts):
                     and len(event["data"]) > 3 and event["data"][3]):
                 fault_modules.append(ntpath.basename(event["data"][3]))
     facts["crash_modules"] = sorted(set(name.lower() for name in fault_modules))
+    crashes = sorted([when for when, what in rows
+                      if what.startswith("ArcGIS Pro crashed")])
+    if crashes:
+        # The first crash dates the incident: a package installed or updated
+        # just before it is a lead, one untouched for a year is not.
+        facts["crash_first"] = crashes[0]
+        facts["crash_last"] = crashes[-1]
     return decide_events(rows, unreadable, len(queries), capped)
 
 
@@ -6168,6 +6435,10 @@ def run_checks(env, opts):
     """Run every check under containment. Returns (checks, facts)."""
     checks = []
     facts = {}
+    # An input, not a measurement: the operator has already established that
+    # Pro starts with /disableaddins and fails with the add-ins loaded. It
+    # changes what PF-31 concludes, never what the machine is.
+    facts["isolated_ok"] = bool(opts.get("addins_isolated_ok"))
     for cid, category, title, dataloss, probe in registrations(env, facts,
                                                                opts):
         def body(target, probe=probe):
@@ -10820,6 +11091,122 @@ def self_test():
           "on a Windows host there is no off-Windows note, and the JSON keys "
           "are sorted so two reports diff cleanly  <-- pinned defect")
 
+    # ----------------------------------------------------- the add-in case
+    print("-" * 70)
+    print("an add-in crash is ranked, not guessed, and isolation is the test")
+
+    def addin(name, path, modified="2026-01-01 10:00", assemblies=(),
+              desktop="3.6.0", version="1.0", warnings=()):
+        return {"kind": "add-in", "name": name, "path": path,
+                "id": "{%s}" % name, "modified": modified, "size": 1024,
+                "version": version, "desktop_version": desktop,
+                "company": "x", "default_assembly": "A.dll",
+                "assemblies": list(assemblies), "startup_modules": ["M1"],
+                "crc": "passed", "warnings": list(warnings), "info": [],
+                "source": "default user"}
+
+    plain = addin("Plain", r"C:\AddIns\Plain.esriAddinX")
+    matching = addin("Matching", r"C:\AddIns\Matching.esriAddinX",
+                     assemblies=["Newtonsoft.Json.dll", "coreclr.dll"])
+    fresh = addin("Fresh", r"C:\AddIns\Fresh.esriAddinX",
+                  modified="2026-11-04 09:00", desktop="3.3.52636")
+    recorded = [plain, matching, fresh]
+
+    ranked = addin_candidates(recorded, ["coreclr.dll"], "3.6.0",
+                              "2026-11-05 08:28:16")
+    check([item["record"]["name"] for item in ranked]
+          == ["Matching", "Fresh", "Plain"],
+          "a packaged fault module outranks a fresh install, which outranks "
+          "nothing measured  <-- pinned defect")
+    check(ranked[0]["reasons"] and "coreclr.dll" in ranked[0]["reasons"][0],
+          "and the first candidate says why it is first")
+    check(any("before the first recorded crash" in reason
+              for reason in ranked[1]["reasons"]),
+          "a package installed the day before the first crash is dated, not "
+          "guessed")
+    check(any("older release" in reason for reason in ranked[1]["reasons"]),
+          "a target release older than the installed one is counted")
+    check(not ranked[2]["reasons"] and ranked[2]["score"] == 0,
+          "a package with no indicator is ranked last and says nothing it "
+          "cannot prove")
+    check(all(item["rank"] == number
+              for number, item in enumerate(ranked, 1)),
+          "the ranking is numbered for the isolation plan")
+
+    quiet = decide_addins(recorded, [], "3.6.0", ["coreclr.dll"],
+                          crash_first="2026-11-05 08:28:16")
+    check(quiet["status"] in ("Info", "Warn") and not quiet.get("dataloss"),
+          "without the isolation test, a matching module stays an indicator, "
+          "not a data-loss finding  <-- pinned defect")
+    check("ISOLATION ORDER" in _join(quiet["observed"]),
+          "but the order is already printed, because it is measurable")
+
+    confirmed = decide_addins(recorded, [], "3.6.0", ["coreclr.dll"],
+                              crash_first="2026-11-05 08:28:16",
+                              isolated_ok=True)
+    check(confirmed["status"] == "Warn" and confirmed["dataloss"] is True,
+          "with the isolation test, PF-31 becomes a data-loss finding")
+    check("OPERATOR EVIDENCE" in _join(confirmed["observed"])
+          and "/disableaddins" in _join(confirmed["observed"]),
+          "and the report records the observation that justifies it")
+    check("WHERE, not of WHICH" in _join(confirmed["observed"]),
+          "while saying plainly that it locates the fault and not the culprit "
+          "<-- pinned defect")
+    steps = confirmed.get("steps") or []
+    check(steps and "Matching" in steps[1] and "quarantine-addin" in steps[1],
+          "the first isolation step names the top candidate and the exact "
+          "command")
+    check(all("Vidages" not in step for step in steps)
+          and any("restaurez" in step for step in steps),
+          "the plan restores a package before moving to the next one")
+    check(confirmed.get("verification") and "/disableaddins" in
+          confirmed["verification"],
+          "and says how the operator knows the isolation worked")
+    check(any(ord(char) > 127 for char in confirmed["explanation"]),
+          "the explanation is written in French, like the rest of the card")
+    check(decide_addins(recorded, [], "3.6.0", [], isolated_ok=True)["status"]
+          == "Warn",
+          "the isolation evidence alone is enough to warn, with no module "
+          "match at all")
+
+    empty = decide_addins([], [], "3.6.0", [], isolated_ok=True)
+    check(empty["status"] == "Warn" and empty["dataloss"] is True,
+          "an add-in case with an empty inventory warns instead of passing, "
+          "which is what a Pass there used to say  <-- pinned defect")
+    check("aucun package" in " ".join(empty.get("steps") or []),
+          "and tells the operator where to look when the inventory is empty")
+
+    for argv in (["--addins-isolated-ok", "--project", r"C:\a.aprx"],
+                 ["--addins-isolated-ok", "--apply"]):
+        check(quiet_main(argv)[0] == USAGE_ERROR,
+              "%s is refused: a workstation observation cannot ride a project "
+              "analysis or a fix" % " ".join(argv))
+    document = run(fake_sick(), dict(opts_with(), addins_isolated_ok=True))
+    pf31 = by_id(document["checks"], "PF-31")
+    check(pf31 is not None and pf31.get("dataloss") is True,
+          "the flag reaches PF-31 through a whole run")
+    check("PF-31" in document["act_first"],
+          "and the check lands in the act-first list, where a lost-edit case "
+          "belongs  <-- pinned defect")
+
+    check(decide_addins([], [], None, platform_readable=False,
+                        isolated_ok=True)["status"] == "Warn",
+          "a host that cannot list the packages still records the isolation "
+          "evidence instead of calling it undetermined  <-- pinned defect")
+    check(decide_addins([], [], None, platform_readable=False,
+                        isolated_ok=False)["status"] == "Info",
+          "and without that evidence the same host stays honest: undetermined")
+    code, out, _err = with_env(OffMachine, ["--addins-isolated-ok", "--json"])
+    offline = json.loads(out)
+    offline_pf31 = by_id(offline["checks"], "PF-31")
+    check(code <= 3 and offline_pf31["status"] == "Warn"
+          and "PF-31" in offline["act_first"],
+          "the CLI on a non-Windows host reports the add-in case as a finding, "
+          "not as an unread measurement")
+    check("gestionnaire des add-ins" in " ".join(
+              offline_pf31.get("steps") or []),
+          "and names where to look when the packages cannot be listed here")
+
     # ------------------------------------------------- the names, not the codes
     print("-" * 70)
     print("a check is named in French, and its code is only a reference")
@@ -11002,10 +11389,21 @@ def self_test():
     check(calls == [] and ".json" in shown,
           "a manifest that is not a .json is refused before the engine")
 
-    code, shown, calls = menu(["9", "6"])
+    calls = menu_argv(["6", "n"])
+    check(calls == [], "choice 6 with a plain no records nothing")
+    calls = menu_argv(["6", "o"])
+    check(len(calls) == 1 and calls[0][0] == "--addins-isolated-ok"
+          and "--apply" not in calls[0]
+          and "--quarantine-addin" not in calls[0],
+          "choice 6 records the isolation test as a read-only diagnostic, so "
+          "the ranking can name a first package without touching it  "
+          "<-- pinned defect")
+
+    code, shown, calls = menu(["9", "7"])
     check(calls == [] and "Reponse attendue" in shown,
           "an unknown key re-asks and says what is accepted")
-    check("--quarantine-addin" in shown and "--restore-addin" in shown,
+    check("--quarantine-addin" in shown and "--restore-addin" in shown
+          and "--addins-isolated-ok" in shown,
           "the help choice lists the equivalent flags for a script")
 
     try:
@@ -11302,6 +11700,12 @@ def _parse(argv):
     ap.add_argument("--confirm-machine-wide", action="store_true",
                     help="confirm an administrator-approved quarantine of a "
                          "machine-wide package; affects other users")
+    ap.add_argument("--addins-isolated-ok", dest="addins_isolated_ok",
+                    action="store_true",
+                    help="record the operator's isolation test: Pro starts "
+                         "correctly with /disableaddins and crashes with the "
+                         "startup packages loaded. Read-only; it changes what "
+                         "PF-31 concludes, never the machine")
     ap.add_argument("--menu", action="store_true",
                     help="offer the actions above as a numbered French menu. "
                          "Each choice runs the same flags a script would "
@@ -11330,7 +11734,8 @@ MENU_ITEMS = (
     ("3", "Reparer une COPIE d'un projet .aprx (l'original reste intact)"),
     ("4", "Mettre en quarantaine un add-in precis, de facon reversible"),
     ("5", "Restaurer un add-in depuis son quarantine.json"),
-    ("6", "Aide : dossiers, commandes equivalentes et codes de sortie"),
+    ("6", "Analyser un test deja fait : Pro demarre SANS les add-ins"),
+    ("7", "Aide : dossiers, commandes equivalentes et codes de sortie"),
     ("0", "Quitter"),
 )
 
@@ -11584,8 +11989,19 @@ def run_menu(streams=None, execute=None, report_dir=None):
                 if code is not None:
                     last = code
             continue
-        # Choice 6 is the only one left, and it stays in the menu on purpose:
-        # it is a reminder, not an action.
+        if choice == "6":
+            show("")
+            show("Ce diagnostic enregistre une observation deja faite :")
+            show("ArcGIS Pro demarre correctement avec /disableaddins, et")
+            show("plante quand les add-ins sont charges. PF-31 classe alors")
+            show("les packages a isoler, dans l'ordre, avec les indices.")
+            show("Rien n'est modifie : le diagnostic reste en lecture seule.")
+            if not confirm("Enregistrer ce test et l'analyser ? [o/N] "):
+                show("Annule. Aucun test enregistre.")
+                continue
+            last = perform("Analyse du test sans add-ins",
+                           ["--addins-isolated-ok"] + report_flags)
+            continue
         show("")
         show("Ce menu appelle les commandes documentees, avec les memes")
         show("controles. Pour un script, utilisez directement :")
@@ -11595,6 +12011,7 @@ def run_menu(streams=None, execute=None, report_dir=None):
         show('  --quarantine-addin \"package.esriAddinX\" '
              '[--confirm-machine-wide]')
         show('  --restore-addin \"quarantine.json\"')
+        show("  --addins-isolated-ok         Pro demarre sans /disableaddins")
         show("")
         show("Rapports par defaut : %s" % report_dir)
         show("Codes : 0 rien a signaler, 1/2 constats a lire, 64 refuse.")
@@ -11658,6 +12075,15 @@ def main(argv=None):
                       or args.json or args.sde_server or args.portal):
         print("error: --menu asks the questions itself; give it no other "
               "action flag, or pass the flags directly for a script.",
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.addins_isolated_ok and args.project:
+        print("error: --addins-isolated-ok describes the workstation; it "
+              "cannot be combined with --project.", file=sys.stderr)
+        return USAGE_ERROR
+    if args.addins_isolated_ok and args.apply:
+        print("error: --addins-isolated-ok is a diagnostic input; run it "
+              "without --apply, then isolate a package from the menu.",
               file=sys.stderr)
         return USAGE_ERROR
     if args.project_repair != "none" and not args.project:
@@ -11769,7 +12195,9 @@ def main(argv=None):
                              "sde_port": args.sde_port,
                              "portal": args.portal,
                              "timeout": args.timeout,
-                             "apply": args.apply})
+                             "apply": args.apply,
+                             "addins_isolated_ok":
+                                 args.addins_isolated_ok})
 
     if args.json:
         print(json.dumps(document, indent=1, sort_keys=True))

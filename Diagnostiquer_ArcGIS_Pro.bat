@@ -92,7 +92,8 @@ goto RUN_DIAGNOSTIC
 :RUN_MENU
 echo.
 echo === Assistant ArcGIS Pro : menu interactif ===
-echo 1 diagnostic, 2 correctif AP-01, 3 copie de projet, 4 quarantaine, 5 restauration.
+echo 1 diagnostic, 2 correctif AP-01, 3 copie de projet, 4 quarantaine, 5 restauration,
+echo 6 test sans add-ins deja effectue, 7 aide.
 echo ArcGIS Pro peut rester ouvert pour le diagnostic ; fermez-le avant une action.
 echo Rapports : "%OUT%"
 echo.

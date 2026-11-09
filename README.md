@@ -194,7 +194,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-852 assertions, 0 failed
+880 assertions, 0 failed
 ```
 
 ## Requirements
@@ -221,7 +221,7 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The suite contains 852 assertions with platform-neutral labels. That matters more than it sounds:
+The suite contains 880 assertions with platform-neutral labels. That matters more than it sounds:
 the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
 the standard library answers for the host instead of for the path. The reads that only exist on
 Windows are also exercised with the platform switched off, so Linux and Windows can cover each
@@ -266,7 +266,8 @@ Assistant ArcGIS Pro : diagnostic, reparation et add-ins
   3) Reparer une COPIE d'un projet .aprx (l'original reste intact)
   4) Mettre en quarantaine un add-in precis, de facon reversible
   5) Restaurer un add-in depuis son quarantine.json
-  6) Aide : dossiers, commandes equivalentes et codes de sortie
+  6) Analyser un test deja fait : Pro demarre SANS les add-ins
+  7) Aide : dossiers, commandes equivalentes et codes de sortie
   0) Quitter
 ```
 
@@ -353,6 +354,7 @@ This writes `Broken_recuperation_sans_vues.aprx` beside the original. It removes
 | `--timeout MS` | `4000` | Bound on each network probe. |
 | `--project APRX` | none | Run the eleven-check selected-project analysis instead of the workstation analysis. Uses a snapshot; safe to use while another project is open. |
 | `--project-repair MODE` | `none` | With `--project`: `repack`, `views`, or `views_history`. Writes a verified new copy beside the source, never overwrites the source. `--apply` cannot be combined with this mode. |
+| `--addins-isolated-ok` | off | Record the operator's isolation test: Pro starts with `/disableaddins` and crashes with the startup packages loaded. Read-only; it turns PF-31 into a ranked isolation plan and a data-loss finding. Refused with `--project` or `--apply`. |
 | `--menu` | off | Offer the actions as a numbered menu. Each choice runs the documented flag, so nothing is reachable here that a script could not run. Falls back to the read-only diagnostic when stdin has no terminal. |
 | `--apply` | off | Run the gated cache fix. It is refused unless its check actually failed and Pro is closed, prints its own undo, and never deletes anything. It never changes the GPU preference. |
 | `--quarantine-addin PACKAGE` | none | Move this exact PF-31-discovered package into verified quarantine. Pro must be closed; arbitrary files are refused. Standalone action, not an automatic diagnosis or fix. |
@@ -582,6 +584,31 @@ escaping, so it is the easiest version to copy. This restores the recorded previ
 of guessing whether the registry value should be deleted or changed. As a separate, non-mutating isolation test, Esri
 supports launching `"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe" /disableaddins`.
 
+### When Pro only starts with `/disableaddins`
+
+That test is the strongest evidence this tool cannot measure by itself: it
+places the fault in startup code, not in the project, the licence or the
+database. Say so and the report changes from an inventory to a plan:
+
+```bat
+Diagnostiquer_ArcGIS_Pro.bat --menu      (choice 6)
+python arcgis_pro_performance_analyser.py --addins-isolated-ok --report C:\Temp\properx --html
+```
+
+PF-31 then becomes a data-loss finding and ranks the packages it found, with
+the reason beside each one: a packaged fault module named by Application Error
+1000, an install or update dated shortly before the first recorded crash, a
+`desktopVersion` older than the installed Pro, and runtime libraries Pro also
+loads (`Newtonsoft.Json.dll`, `Microsoft.IdentityModel.*`, …) that can win the
+assembly-binding race and take the .NET runtime down. The ranking is labelled
+a lead, not a verdict: isolation is still one package at a time, and the
+report says so in the same sentence.
+
+The step list is generated from that ranking, so it names the first package to
+quarantine, the command, and what to do when the crash comes back. An empty
+inventory is not reported as a pass in this case: it warns and points at
+Add-In Manager and any managed-configuration launch shortcut.
+
 ### Explicit add-in quarantine and restore
 
 Quarantine is **not** an automatic repair and PF-31 never selects a package as
@@ -738,7 +765,7 @@ while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
 python tests/test_toolbox.py      # 156 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 852 assertions over the diagnostic
+python arcgis_pro_performance_analyser.py --self-test   # 880 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 

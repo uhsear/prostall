@@ -62,7 +62,8 @@ Assistant ArcGIS Pro : diagnostic, reparation et add-ins
   3) Reparer une COPIE d'un projet .aprx (l'original reste intact)
   4) Mettre en quarantaine un add-in precis, de facon reversible
   5) Restaurer un add-in depuis son quarantine.json
-  6) Aide : dossiers, commandes equivalentes et codes de sortie
+  6) Analyser un test deja fait : Pro demarre SANS les add-ins
+  7) Aide : dossiers, commandes equivalentes et codes de sortie
   0) Quitter
 ```
 
@@ -98,6 +99,39 @@ une action refusée ou une écriture invalide. **Tant que vous ne choisissez que
 1 ou Entrée**, le lanceur ne répare aucun projet et ne modifie ni le registre
 ni les add-ins. Si le menu lui-même échoue, le code est 64 et non 1 : la pile
 d'appels est affichée pour être transmise, et aucune action n'est lancée.
+
+### Si ArcGIS Pro ne démarre qu'avec `/disableaddins`
+
+C'est le cas le plus fréquent quand « la réparation n'a rien changé » : le
+projet, la licence et la géodatabase ne sont pas en cause, le code chargé au
+démarrage l'est. Ce test, le logiciel ne peut pas le faire à votre place —
+mais il peut l'enregistrer et en tirer le plan d'isolation.
+
+Dans le menu, **choix 6** ; en ligne de commande :
+
+```bat
+python arcgis_pro_performance_analyser.py --addins-isolated-ok --report "D:\Diagnostics\Poste" --html
+```
+
+Le contrôle des add-ins (PF-31) devient alors un constat de **perte de
+données**, et les packages trouvés sont **classés**, avec la raison à côté de
+chacun :
+
+- un module défaillant cité par une erreur 1000 est livré par le package ;
+- le package a été installé ou mis à jour peu avant le premier plantage daté ;
+- sa `desktopVersion` vise une version d'ArcGIS Pro plus ancienne que celle
+  installée ;
+- il embarque des bibliothèques que Pro charge déjà (`Newtonsoft.Json.dll`,
+  `Microsoft.IdentityModel.*`…), ce qui peut faire échouer la résolution
+  d'assemblys et faire tomber le runtime .NET.
+
+Le classement est présenté comme une **piste**, jamais comme un verdict :
+l'isolation reste un package à la fois, et la phrase qui l'accompagne le dit.
+Les étapes générées nomment le premier package à isoler, la commande exacte,
+et la marche à suivre si le plantage revient (restaurer, puis passer au
+suivant). Un inventaire vide n'est plus un « Conforme » dans ce cas : il
+avertit et renvoie vers le gestionnaire des add-ins d'ArcGIS Pro et une
+éventuelle configuration gérée.
 
 ### Les mêmes actions, sans menu, pour un script
 
@@ -330,7 +364,7 @@ que la garantie ne rapporte : **l'outil a été retiré de la boîte à outils.*
 Il reste disponible en ligne de commande, pour le développement :
 
 ```
-python arcgis_pro_performance_analyser.py --self-test   # 852 assertions
+python arcgis_pro_performance_analyser.py --self-test   # 880 assertions
 ```
 
 Une assertion que la machine ne peut pas lancer est annoncée `SKIP` avec sa
@@ -514,7 +548,7 @@ rapport le dit.
 
 ```
 python tests/test_toolbox.py      # 156 assertions : rendu, deux outils, sécurité dans Pro et récupération .aprx
-python arcgis_pro_performance_analyser.py --self-test   # 852 assertions sur le diagnostic
+python arcgis_pro_performance_analyser.py --self-test   # 880 assertions sur le diagnostic
 python build_toolbox.py --check   # le .pyt livré est bien ce que ses sources produisent
 ```
 
