@@ -194,7 +194,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-828 assertions, 0 failed
+834 assertions, 0 failed
 ```
 
 ## Requirements
@@ -221,7 +221,7 @@ exercises the reading layer itself against a real temporary directory and a real
 and runs the whole tool once, read-only, on the machine you run it on. That run is captured, not
 printed.
 
-The suite contains 828 assertions with platform-neutral labels. That matters more than it sounds:
+The suite contains 834 assertions with platform-neutral labels. That matters more than it sounds:
 the path logic answers questions about Windows paths, and two of the bugs it pins are cases where
 the standard library answers for the host instead of for the path. The reads that only exist on
 Windows are also exercised with the platform switched off, so Linux and Windows can cover each
@@ -546,7 +546,7 @@ enforced rather than documented:
 | 1 | Measured workstation or project findings, none bearing on lost edits. |
 | 2 | At least one finding bearing on lost edits. |
 | 3 | No finding, and nothing was determined either. |
-| 64 | A usage error, a refused/incomplete add-in action, or `--report` could not write its files. |
+| 64 | A usage error, a refused/incomplete add-in action, `--report` could not write its files, or the menu hit an internal failure (its traceback is printed, so the case can be reported). |
 
 Code 3 exists because a wrapper reads the exit code and never sees the note on stderr. A run that
 could read nothing, such as PowerShell blocked or a host that is not Windows, has no finding, and
@@ -734,7 +734,7 @@ while Pro stays open, using a snapshot and rejecting the active project.
 
 ```
 python tests/test_toolbox.py      # 144 assertions over the renderer, both tools and project recovery
-python arcgis_pro_performance_analyser.py --self-test   # 828 assertions over the diagnostic
+python arcgis_pro_performance_analyser.py --self-test   # 834 assertions over the diagnostic
 python build_toolbox.py --check   # the shipped .pyt is what its three sources build to
 ```
 

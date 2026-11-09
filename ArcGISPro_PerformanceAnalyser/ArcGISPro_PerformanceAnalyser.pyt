@@ -52,7 +52,7 @@ or source data is deleted.
 
 Provenance
 ----------
-  arcgis_pro_performance_analyser.py       11584 lines  sha256:c6d4fcd710ca
+  arcgis_pro_performance_analyser.py       11663 lines  sha256:e00f83d45f83
   html_report.py                             966 lines  sha256:184c9b6eaf73
   toolbox_glue.py                            880 lines  sha256:e5119eda14dd
 """
@@ -61,7 +61,7 @@ from __future__ import print_function
 
 # ============================================================================
 # 1/3  diagnostic engine
-# source: arcgis_pro_performance_analyser.py  (sha256:c6d4fcd710ca)
+# source: arcgis_pro_performance_analyser.py  (sha256:e00f83d45f83)
 # ----------------------------------------------------------------------------
 # r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 #
@@ -10982,6 +10982,68 @@ def self_test():
     check(not stdin_has_terminal(None) or True,
           "and a missing stdin is answered, never raised")
 
+    # The shipped call is run_menu() with no streams at all: main passes only
+    # a report folder. Every assertion above handed streams in, so this bug -
+    # the resolved pair was unpacked but `streams` was what got passed on -
+    # shipped and failed on the first real double-click.
+    class FakeTerminal(io.StringIO):
+        """A stdin that can be answered: isatty() true, answers replayed."""
+
+        def isatty(self):
+            return True
+
+    direct = io.StringIO()
+    real_out, real_in = sys.stdout, sys.stdin
+    sys.stdout, sys.stdin = direct, FakeTerminal("0\n")
+    try:
+        direct_code = run_menu(execute=lambda argv: 0,
+                               report_dir="C:\\Rapports")
+    finally:
+        sys.stdout, sys.stdin = real_out, real_in
+    check(direct_code == 0 and "Votre choix" in direct.getvalue(),
+          "run_menu() with no streams at all - the call main actually makes - "
+          "reads default streams instead of failing on None  <-- pinned defect")
+
+    interactive_dir = tempfile.mkdtemp(prefix="properf-menu-live-")
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = FakeTerminal("1\n0\n")
+        code, out, err = with_env(fake_healthy,
+                                  ["--menu", "--report", interactive_dir,
+                                   "--html"])
+        check(code <= 3 and "Votre choix [1]" in out
+              and "Assistant ArcGIS Pro" in out,
+              "with a terminal on stdin, --menu really draws the menu and "
+              "runs the chosen action  <-- pinned defect")
+        check("Traceback" not in err,
+              "and the interactive path raises no traceback")
+        check(sorted(os.path.splitext(name)[1] for name in
+                     os.listdir(interactive_dir)) == [".html", ".json", ".txt"],
+              "the interactive run writes the same three reports as the "
+              "fallback")
+    finally:
+        sys.stdin = real_stdin
+        shutil.rmtree(interactive_dir, ignore_errors=True)
+
+    real_stdin = sys.stdin
+    real_menu = globals()["run_menu"]
+
+    def exploding_menu(**_kwargs):
+        raise RuntimeError("a menu that cannot draw itself")
+
+    try:
+        sys.stdin = FakeTerminal("\n")
+        globals()["run_menu"] = exploding_menu
+        code, err = quiet_main(["--menu"])
+    finally:
+        sys.stdin = real_stdin
+        globals()["run_menu"] = real_menu
+    check(code == USAGE_ERROR and "erreur interne" in err,
+          "an internal menu failure exits 64 with a readable line, not the 1 "
+          "that means findings to read  <-- pinned defect")
+    check("Traceback" in err and "a menu that cannot draw itself" in err,
+          "and keeps the traceback for the support ticket")
+
     fallback_dir = tempfile.mkdtemp(prefix="properf-menu-fallback-")
     real_stdin = sys.stdin
     try:
@@ -11290,7 +11352,11 @@ def run_menu(streams=None, execute=None, report_dir=None):
     command line. Returns the last action's exit code, or 0 when the operator
     quits before running one.
     """
-    out, _source = streams or (sys.stdout, sys.stdin)
+    # The resolved pair is what every prompt below must use: reading the
+    # call-time default here and then passing `streams` on gave the shipped
+    # no-argument path None, and the first question raised a TypeError.
+    streams = streams or (sys.stdout, sys.stdin)
+    out, _source = streams
     run = execute or _menu_run_cli
     report_dir = report_dir or default_report_dir()
     report_flags = ["--report", report_dir, "--html", "--verbose"]
@@ -11571,6 +11637,19 @@ def main(argv=None):
             print("Assistant interrompu. Aucune autre action n'a ete lancee.",
                   file=sys.stderr)
             return 0
+        except Exception:
+            # An internal failure must not exit 1: 1 and 2 mean "findings to
+            # read", and an operator who sees that reads a report that was
+            # never written. The traceback stays, for the support ticket.
+            import traceback
+            print("", file=sys.stderr)
+            print("Assistant interrompu par une erreur interne. Aucune autre "
+                  "action n'a ete lancee.", file=sys.stderr)
+            traceback.print_exc()
+            print("Signalez ce message avec la version du script ; en "
+                  "attendant, les options en ligne de commande restent "
+                  "disponibles (--help).", file=sys.stderr)
+            return USAGE_ERROR
 
     env = Env()
     if not env.windows and not args.project and not addin_actions:
