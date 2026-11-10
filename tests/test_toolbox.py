@@ -565,6 +565,52 @@ check("arcgispro-py3\\python.exe" in batch and "where py" in batch
       "Pro's Python, fallbacks and the HTML report opening are all wired")
 
 print("-" * 70)
+print("the tool carries nothing that belongs to one machine")
+# The tool is shared across an organisation, so the shipped files must never
+# name a real Windows profile, a real add-in or a real host. The fixtures that
+# do use a C:\Users\... path use a placeholder name, which is why the check is
+# a whitelist rather than a ban.
+# "*" is a wildcard this tool documents for a Defender exclusion, and "<name>"
+# is a placeholder; neither belongs to a person.
+PLACEHOLDER_PROFILES = {"editor", "ed", "relief", "moi", "example", "name",
+                        "username", "utilisateur", "<name>", "*"}
+SHIPPED = ("arcgis_pro_performance_analyser.py", "html_report.py",
+           "toolbox_glue.py", "build_toolbox.py",
+           "Diagnostiquer_ArcGIS_Pro.bat", "README.md",
+           os.path.join("ArcGISPro_PerformanceAnalyser", "LISEZMOI.md"),
+           "ArcGISPro_PerformanceAnalyser/ArcGISPro_PerformanceAnalyser.pyt")
+profile_path = re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+([^\\/\"'\s,;)]+)")
+offenders = {}
+for name in SHIPPED:
+    body = io.open(os.path.join(ROOT, name), encoding="utf-8").read()
+    for match in profile_path.finditer(body):
+        profile_name = match.group(1)
+        if profile_name.lower() not in PLACEHOLDER_PROFILES:
+            offenders.setdefault(name, set()).add(profile_name)
+check(not offenders,
+      "no shipped file names a real Windows profile, so a copy pasted into a "
+      "share belongs to nobody in particular: %s"
+      % (offenders or "none found"))
+emails = {}
+for name in SHIPPED:
+    body = io.open(os.path.join(ROOT, name), encoding="utf-8").read()
+    found = [address for address in
+             re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", body)
+             if not address.lower().endswith(("example.org", "example.com"))]
+    if found:
+        emails[name] = found
+check(not emails,
+      "and none carries a personal e-mail address: %s"
+      % (emails or "none found"))
+check("%LOCALAPPDATA%" in batch,
+      "the launcher resolves the report folder from the running account, not "
+      "from a hard-coded path")
+check("~" in io.open(os.path.join(ROOT, "arcgis_pro_performance_analyser.py"),
+                     encoding="utf-8").read(),
+      "and the engine falls back to the running user's home when the Windows "
+      "variables are absent")
+
+print("-" * 70)
 print("the .pyt loads and its tools are what ArcGIS Pro will see")
 pyt = load_pyt()
 inline_dir = tempfile.mkdtemp(prefix="properf-inline-html-")

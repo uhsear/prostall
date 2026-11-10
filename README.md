@@ -306,6 +306,36 @@ fresh diagnostic and opens its HTML report. The menu calls these same flags
 (choice 2 is `--apply`, choice 3 is `--repair-aprx`, and so on). See the safety
 gates below before using either route.
 
+### Sharing it across an organisation
+
+Three files make the tool: `Diagnostiquer_ArcGIS_Pro.bat`,
+`arcgis_pro_performance_analyser.py` and `html_report.py`. Copy them together
+into a local folder on each workstation — running them from a network share is
+not tested — and nobody needs to install anything, run as administrator, or
+open ArcGIS Pro.
+
+- **Nothing in the code names a machine.** No host, no profile path, no add-in
+  name, no e-mail address: the launcher resolves its report folder from the
+  running account, and the test suite fails if a shipped file starts naming a
+  real Windows profile. That is what makes one copy safe to hand out.
+- **Each operator runs it in their own Windows session.** The per-user
+  settings, caches and Add-In Manager entries belong to the account that
+  starts the tool, so running it *for* a colleague from your session reads the
+  wrong profile. The reports then land in that user's
+  `%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports`.
+- **The machine stays untouched unless a mode is chosen.** A plain run writes
+  reports and nothing else. The cache fix, a recovery copy and the add-in
+  quarantine are explicit, each prints its undo, and quarantine copies rather
+  than deletes.
+- **A report is an internal document.** It contains the account name, Windows
+  paths, installed add-ins, the event timeline and the project folder. Share
+  it with support deliberately, keep it off public hosts, and send the JSON
+  over a channel the organisation already trusts — it holds the same detail
+  in machine-readable form and is what two workstations are compared with.
+- **The tool talks to no server of its own.** No telemetry, no update check,
+  and the report's Content-Security-Policy forbids external resources. Only
+  `--sde-server` and `--portal` reach the network, and only when named.
+
 For a scripted run, use the editor's own session, without elevation, while Pro
 is closed:
 

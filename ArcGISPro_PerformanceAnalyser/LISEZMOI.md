@@ -43,6 +43,39 @@ module, parce que l'une masquerait l'autre silencieusement.
 C'est tout : il n'y a pas d'étape 4. Prérequis : ArcGIS Pro 3.x (Python 3.9+),
 bibliothèque standard uniquement.
 
+## Partager l'outil dans l'organisation
+
+Trois fichiers suffisent : `Diagnostiquer_ArcGIS_Pro.bat`,
+`arcgis_pro_performance_analyser.py` et `html_report.py`. Copiez-les **ensemble**
+dans un dossier local de chaque poste — l'exécution depuis un partage réseau
+n'est pas testée. Aucun n'a besoin d'être installé, d'être lancé en
+administrateur, ni d'ouvrir ArcGIS Pro.
+
+- **Rien dans le code ne désigne un poste.** Ni hôte, ni chemin de profil, ni
+  nom d'add-in, ni adresse électronique : le lanceur déduit son dossier de
+  rapports du compte qui l'exécute, et la suite de tests échoue si un fichier
+  livré se met à nommer un vrai profil Windows. C'est ce qui rend une copie
+  distribuable telle quelle.
+- **Chaque utilisateur lance l'outil dans sa propre session Windows.** Les
+  réglages, caches et entrées du gestionnaire d'add-ins appartiennent au compte
+  qui exécute : le faire « pour » un collègue depuis votre session lirait le
+  mauvais profil. Les rapports atterrissent alors dans le
+  `%LOCALAPPDATA%\ArcGISPro_PerformanceAnalyser\Rapports` de cet utilisateur.
+- **La machine n'est pas modifiée sans un choix explicite.** Un passage normal
+  écrit des rapports et rien d'autre. Le correctif de cache, la copie de
+  récupération et la quarantaine d'add-in sont des choix, chacun affiche son
+  annulation, et la quarantaine copie au lieu de supprimer.
+- **Un rapport est un document interne.** Il contient le nom du compte, des
+  chemins Windows, les add-ins installés, la chronologie des événements et le
+  dossier du projet. Partagez-le avec le support de façon délibérée, évitez les
+  hébergements publics, et transmettez le JSON par un canal déjà approuvé : il
+  porte la même information, lisible par machine, et c'est lui que l'on compare
+  entre deux postes.
+- **L'outil ne contacte aucun serveur qui lui soit propre.** Pas de télémétrie,
+  pas de recherche de mise à jour ; la politique de sécurité du rapport HTML
+  interdit toute ressource externe. Seuls `--sde-server` et `--portal` sortent
+  sur le réseau, et seulement s'ils sont nommés.
+
 ## Diagnostic par `.bat`, sans ouvrir ArcGIS Pro
 
 À la racine du dépôt, conservez ensemble ces trois fichiers :
