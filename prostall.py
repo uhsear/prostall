@@ -2,12 +2,12 @@
 r"""Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did not produce.
 
 An editor says Pro takes five minutes to open, hangs mid-edit, and sometimes
-her saved edits are gone. There is no error message. The causes are spread
+their saved edits are gone. There is no error message. The causes are spread
 across the registry, the filesystem, OneDrive's redirection state, Offline
 Files and the per-app GPU preference, and no single pane shows them together.
 The deeper problem is the diagnostic itself. A check that prints a verdict on
 something it never measured teaches the operator to distrust the whole report,
-and the report is the only thing standing between her and a rebuild.
+and the report is the only thing standing between them and a rebuild.
 
 ArcGIS Pro ships a Diagnostic Monitor, and it is the right tool for what it
 does: it traces Pro from inside the process, timestamps every event, and hands
@@ -45,6 +45,7 @@ import os
 import re
 import socket
 import sys
+import textwrap
 import time
 
 # =============================================================================
@@ -58,35 +59,35 @@ import time
 # listed here runs; an id listed here that no check owns is a startup error.
 CHECKS_ENABLED = {
     # Data loss
-    "DL-00": True,   # Diagnostic is running as the editor
-    "DL-05": True,   # Project storage location
-    "DL-03": True,   # Project backup interval
-    "DL-04": True,   # Network adapter power management
-    "DL-06": True,   # OneDrive Known Folder Move
-    "DL-07": True,   # Cloud placeholders
-    "DL-08": True,   # Offline Files
-    "DL-09": True,   # Crash dumps
-    "DL-10": True,   # SDE server reachability (also needs SDE_SERVER)
-    "DL-11": True,   # SDE connection files
-    "DL-12": True,   # Pro running during the diagnostic
-    "DL-13": True,   # Event timeline
-    "PF-07": True,   # Leftover session folders
+    "DL-00": True,   # Account being checked
+    "DL-05": True,   # Where projects are stored
+    "DL-03": True,   # Project backup setting
+    "DL-04": True,   # Network adapter power saving
+    "DL-06": True,   # Documents folder synced by OneDrive
+    "DL-07": True,   # Online-only OneDrive files in project folders
+    "DL-08": True,   # Windows Offline Files
+    "DL-09": True,   # ArcGIS Pro crash files
+    "DL-10": True,   # Connection to the database server
+    "DL-11": True,   # Database connection files (.sde)
+    "DL-12": True,   # ArcGIS Pro open during the check
+    "DL-13": True,   # Crashes and freezes in the Windows event log
+    "PF-07": True,   # Leftover ArcGIS Pro session folders
     # Performance
-    "PF-02": True,   # SMB client configuration
-    "PF-03": True,   # Directory listing time on the project share
-    "PF-04": True,   # Pro version and patch level
-    "PF-05": True,   # Rendering and display settings
-    "PF-06": True,   # ESRI local caches
-    "PF-08": True,   # Search index state
-    "PF-11": True,   # Per-app GPU preference
-    "PF-12": True,   # Physical memory
+    "PF-02": True,   # Network file-share (SMB) settings
+    "PF-03": True,   # Network share speed
+    "PF-04": True,   # ArcGIS Pro version
+    "PF-05": True,   # Pro display settings
+    "PF-06": True,   # Pro local cache
+    "PF-08": True,   # Pro search index
+    "PF-11": True,   # Graphics card used by Pro
+    "PF-12": True,   # Memory (RAM)
     "PF-13": True,   # Free disk space
-    "PF-15": True,   # Active power plan
-    "PF-17": True,   # Microsoft Defender exclusions
-    "PF-19": True,   # Portal reachability (also needs PORTAL)
-    "PF-22": True,   # Layer refresh timers from the .aprx
+    "PF-15": True,   # Power plan
+    "PF-17": True,   # Antivirus exclusions (Microsoft Defender)
+    "PF-19": True,   # Connection to the portal
+    "PF-22": True,   # Layer refresh timers and default geodatabase
     "PF-26": True,   # Roaming profile
-    "PF-27": True,   # Symbology refresh (S4)
+    "PF-27": True,   # Map not redrawing after a field calculation
 }
 
 # -- Which fixes --apply may run ----------------------------------------------
@@ -107,6 +108,12 @@ SDE_PORT = 1433         # --sde-port
 PORTAL = None           # --portal, such as "gis.example.org"
 TIMEOUT_MS = 4000       # --timeout, the bound on each network probe
 REPORT_DIR = None       # --report, None writes no file
+HTML_FILE = None        # --html, such as r"C:\Temp\prostall.html"
+OPEN_HTML = True        # open the HTML report in the browser once written;
+                        # --no-open turns it off for one run
+
+# The line printed above the title of the HTML report. "" prints none.
+HTML_ORG_NAME = "New York City Emergency Management"
 
 # Where Pro is assumed to be installed when the registry does not say.
 DEFAULT_PRO_EXE = r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"
@@ -201,7 +208,8 @@ SYMPTOMS = (
 
 # Report format version. Bumped when the JSON shape changes, so a diff against
 # an older report from a known-good workstation fails loudly instead of quietly.
-REPORT_VERSION = 1
+# 2 added the plain-language "result" sentence to every check.
+REPORT_VERSION = 2
 
 # Get-MpPreference does not fail for a caller who may not see the exclusion
 # lists. It puts this text where each list would be. Compared as a path, it
@@ -257,7 +265,7 @@ def _join(value):
 
 def make_check(cid, category, title, status, observed, expected="", impact="",
                fix="", autofixable=False, dataloss=False, detail="",
-               measured=True):
+               measured=True, result=""):
     """Build one check record, or refuse.
 
     Four refusals, each one a defect somebody shipped:
@@ -288,12 +296,14 @@ def make_check(cid, category, title, status, observed, expected="", impact="",
         "category": category,
         "title": title,
         "status": status,
+        "result": result,
         "dataloss": bool(dataloss),
         "observed": observed,
         "expected": expected,
         "impact": impact,
         "fix": fix,
         "autofixable": bool(autofixable),
+        "measured": bool(measured),
         "detail": detail,
     }
 
@@ -323,13 +333,15 @@ def safe_check(checks, cid, category, title, body, dataloss=False):
     except Exception as exc:   # any probe failure, including a refused verdict
         add_check(checks, cid=cid, category=category, title=title,
                   status="Skipped", dataloss=dataloss, measured=False,
+                  result="Not checked: the check stopped with an error.",
                   observed="Probe failed and was not measured this run: "
                            "%s: %s" % (type(exc).__name__, exc),
                   expected="The check completes and records a value.",
-                  impact="Unknown. This cause was neither ruled in nor out, "
-                         "and no fix will run off this record.",
-                  fix="Re-run, collect the item by hand, or report the "
-                      "exception above as a bug in this tool.")
+                  impact="This possible cause is neither confirmed nor ruled "
+                         "out, and no automatic fix will act on it.",
+                  fix="Run prostall again. If the same error appears, check "
+                      "this item by hand and report the error as a bug in "
+                      "prostall.")
         return
     if len(checks) == before:
         # A body that emitted nothing is a bug in the body, not a healthy
@@ -337,11 +349,14 @@ def safe_check(checks, cid, category, title, body, dataloss=False):
         # this whole tool exists to prevent.
         add_check(checks, cid=cid, category=category, title=title,
                   status="Skipped", dataloss=dataloss, measured=False,
+                  result="Not checked: the check finished without a result.",
                   observed="The check produced no record, so nothing about it "
                            "was measured.",
                   expected="At least one record.",
-                  impact="Unknown.",
-                  fix="Collect this item by hand and report the empty check.")
+                  impact="This possible cause is neither confirmed nor ruled "
+                         "out.",
+                  fix="Check this item by hand, and report the empty result "
+                      "as a bug in prostall.")
 
 
 # =============================================================================
@@ -568,6 +583,7 @@ def decide_session(me, other_profiles, elevated):
     wrong hive, and its "absent" results mean nothing. That is more dangerous
     than a plain failure, because absent reads as healthy.
     """
+    title = "Account being checked"
     lines = ["Running as: %s  (elevated: %s)" % (me, elevated)]
     for name in other_profiles:
         lines.append("Profile carrying ArcGIS Pro user data: %s" % name)
@@ -576,47 +592,51 @@ def decide_session(me, other_profiles, elevated):
                      "profile, not that one.")
         return dict(
             cid="DL-00", category="Session", dataloss=True, status="Fail",
-            title="Diagnostic ran under the wrong profile, so the per-user "
-                  "results are invalid",
+            title=title,
+            result="Wrong account. prostall ran as %s, but ArcGIS Pro is "
+                   "used from %s. The per-user results in this report "
+                   "describe the wrong account." % (me,
+                                                    ", ".join(other_profiles)),
             observed=lines,
             expected="The tool runs in the editor's own logged-on session, so "
                      "the ESRI folders, user.config, project paths, OneDrive "
-                     "state and local caches it reads are hers.",
-            impact="All symptoms. Every per-user check reported absent because "
-                   "this profile has no Pro data. Absent here means not "
-                   "measured, not healthy.",
-            fix="Re-run inside the session of %s, without elevation first. The "
-                "machine-wide checks in this run are still valid."
-                % ", ".join(other_profiles))
+                     "state and local caches it reads are the editor's.",
+            impact="Settings that look missing in this report may only be "
+                   "missing from this account. Treat every per-user result "
+                   "as unchecked.",
+            fix="Sign in as %s and run prostall again, without \"Run as "
+                "administrator\". The machine-wide results in this report "
+                "are still valid." % ", ".join(other_profiles))
     return dict(
         cid="DL-00", category="Session", dataloss=True, status="Pass",
-        title="Diagnostic is running as the editor",
+        title=title,
+        result="prostall ran as %s, and no other account on this computer "
+               "has ArcGIS Pro data." % me,
         observed=lines,
-        expected="No other profile on this machine carries ArcGIS Pro user data.",
-        impact="The per-user findings below describe the account that edits.",
-        fix="None.")
+        expected="No other profile on this machine carries ArcGIS Pro user data.")
 
 
 def decide_backup(config_path, settings, home_class):
     """DL-03. The project backup interval, and what it does not protect.
 
-    Named for what it is not. Editors read "Create backups of project" as an
-    autosave for their edits; it backs up the project file and nothing else, so
-    a stranded version state is stranded regardless of this setting. On a
-    network or synced home folder a short interval is also a recurring
-    multi-second stall, which is the pause the editor calls "the refresh".
+    Editors read "Create backups of project" as an autosave for their edits; it
+    backs up the project file and nothing else, so a stranded version state is
+    stranded regardless of this setting. On a network or synced home folder a
+    short interval is also a recurring multi-second stall, which is the pause
+    the editor calls "the refresh".
     """
+    title = "Project backup setting"
     if not config_path:
         return dict(
             cid="DL-03", category="ArcGISPro", dataloss=True, status="Info",
-            measured=False,
-            title="Pro project backup interval",
+            measured=False, title=title,
+            result="Could not check: Pro's settings file (user.config) was "
+                   "not found for this account.",
             observed="No user.config was located for this profile, so the "
                      "backup settings could not be read.",
             expected="A readable user.config for the installed Pro release.",
-            impact="S2 and S3 undetermined.",
-            fix="Read it in Pro: Project > Options > General > Create backups "
-                "of project.")
+            fix="In Pro, open Project > Options > General and look at "
+                "\"Create backups of project\".")
     enabled = cfg(settings, "CreateProjectBackups")
     interval = cfg(settings, "CreateProjectBackupsIntervalMinutes")
     limit = cfg(settings, "SaveProProjectLimit")
@@ -630,9 +650,24 @@ def decide_backup(config_path, settings, home_class):
     if (str(enabled) == "True" and 0 < minutes <= 5
             and home_class in ("NETWORK", "ONEDRIVE")):
         status = "Warn"
+    if status == "Warn":
+        result = ("Pro backs up the project every %d minutes to a folder "
+                  "that is not on this computer, which causes a short "
+                  "freeze each time." % minutes)
+        fix = ("In Pro, open Project > Options > General > \"Create "
+               "backups of project\". Set the interval to 15 minutes or "
+               "more, or turn backups off while the project is on a network "
+               "or OneDrive folder. Tell the editor this setting does not "
+               "save their edits.")
+    elif str(enabled) == "True":
+        result = "Project backups are on, every %s minutes." % interval
+        fix = ""
+    else:
+        result = "Project backups are off."
+        fix = ""
     return dict(
         cid="DL-03", category="ArcGISPro", dataloss=True, status=status,
-        title="Pro project backup is not an edit autosave",
+        title=title, result=result,
         observed=["CreateProjectBackups = %s" % enabled,
                   "CreateProjectBackupsIntervalMinutes = %s" % interval,
                   "SaveProProjectLimit = %s" % limit,
@@ -641,13 +676,9 @@ def decide_backup(config_path, settings, home_class):
         expected="Understood as a project-file backup only. On a network or "
                  "synced home folder an interval of five minutes or less is a "
                  "recurring multi-second stall.",
-        impact="S2, the periodic stall the editor calls a refresh. It does not "
-               "protect against S3: this copies the project file, never the "
-               "edit session, so a lost version state is lost either way.",
-        fix="Project > Options > General > Create backups of project: raise "
-            "the interval, or turn it off while the home folder is remote, and "
-            "lower SaveProProjectLimit to cut backup churn. Tell the editor "
-            "plainly that this feature does not protect her feature edits.",
+        impact="This backup copies the project file only. It does not protect "
+               "the edits themselves, so it will not bring back lost edits.",
+        fix=fix,
         detail="Read-only parse. Hand-editing user.config is unsupported and "
                "is overwritten the next time Pro saves settings.")
 
@@ -657,22 +688,21 @@ def decide_storage(entries):
 
     entries: (path, when, class) newest first.
 
-    One title per branch. A single accusatory title made a healthy machine
-    print "[PASS] Active projects live on network storage", which reads as the
-    failure in a report whose whole value is being diffed against a known-good
-    workstation.
+    One title per check, and the outcome in the result. A title that stated
+    the problem made a healthy machine print "[PASS] Active projects live on
+    network storage", which reads as the failure.
     """
+    title = "Where projects are stored"
     if not entries:
         return dict(
             cid="DL-05", category="Storage", dataloss=True, status="Info",
-            measured=False,
-            title="Project storage location",
+            measured=False, title=title,
+            result="Could not check: no recently opened project was found.",
             observed="No recently opened project was found, so where the "
                      "editor works could not be determined.",
             expected="Projects used for active editing on a local disk.",
-            impact="S1 and S2 undetermined.",
-            fix="Ask the editor to open her project and read Project > "
-                "Options > General > Current Settings > Home Folder.")
+            fix="Ask the editor to open their project, then look at Project "
+                "> Options > General > Current Settings > Home Folder.")
     lines = []
     remote = []
     for path, when, cls in entries:
@@ -682,27 +712,31 @@ def decide_storage(entries):
     if remote:
         return dict(
             cid="DL-05", category="Storage", dataloss=True, status="Fail",
-            title="Active projects live on network or synced storage",
+            title=title,
+            result="%d of %d recent project(s) are stored on a network drive "
+                   "or in OneDrive, not on this computer."
+                   % (len(remote), len(entries)),
             observed=lines,
             expected="Projects used for active editing on a local disk. File "
                      "geodatabases and project files are chatty - many small "
                      "metadata round trips per operation - and every one pays "
                      "the latency of the share.",
-            impact="S1 slow open, S2 stall during a backup, S3 a save that "
-                   "times out over SMB is what strands a version state, and "
-                   "S5 paste round trips.",
-            fix="Copy the working project and any file geodatabase to a local "
-                "folder for active editing, and keep only the enterprise "
-                "layers remote. --apply will not move projects: that is a "
-                "reviewed operator action.",
+            impact="Pro reads and writes many small files while you work. Over "
+                   "a network or a sync folder this makes projects slow to "
+                   "open, causes freezes, and a save that times out can lose "
+                   "edits.",
+            fix="Copy the project folder, and any file geodatabase it uses, "
+                "to a folder on this computer (for example C:\\GIS\\Projects) "
+                "and edit it there. Keep only enterprise geodatabase layers "
+                "on the server. prostall will not move projects for you.",
             detail="remote=%d of %d recent project(s)" % (len(remote),
                                                           len(entries)))
     return dict(
         cid="DL-05", category="Storage", dataloss=True, status="Pass",
-        title="Project storage location (every recent project is local)",
+        title=title,
+        result="Every recent project is stored on this computer.",
         observed=lines,
-        expected="Projects used for active editing on a local disk.",
-        impact="None.", fix="None.")
+        expected="Projects used for active editing on a local disk.")
 
 
 def decide_kfm(documents, onedrive_root, account_lines):
@@ -715,6 +749,7 @@ def decide_kfm(documents, onedrive_root, account_lines):
     redirected, so the line contradicted the finding. Every account subkey is
     enumerated, because a second tenant lands on its own key.
     """
+    title = "Documents folder synced by OneDrive"
     lines = ["Documents (Personal) = %s" % (documents or "<unreadable>"),
              "OneDrive root        = %s" % (onedrive_root or "<unset>")]
     lines.extend(account_lines or
@@ -722,34 +757,43 @@ def decide_kfm(documents, onedrive_root, account_lines):
     if not documents:
         return dict(
             cid="DL-06", category="Storage", dataloss=True, status="Info",
-            measured=False,
-            title="OneDrive Known Folder Move",
+            measured=False, title=title,
+            result="Could not check: the location of the Documents folder "
+                   "could not be read.",
             observed=lines + ["The Documents shell folder could not be read, "
                               "so redirection was not determined."],
             expected="GIS projects outside every OneDrive-synced tree.",
-            impact="S1, S2 and S3 undetermined.",
-            fix="Read it by hand, on the Location tab of the Documents folder "
-                "properties.")
+            fix="Right-click the Documents folder, choose Properties, and "
+                "look at the Location tab. If it points into OneDrive, "
+                "projects saved there are synced.")
     redirected = is_onedrive_path(
         documents, [onedrive_root] if onedrive_root else [])
+    if not redirected:
+        return dict(
+            cid="DL-06", category="Storage", dataloss=True, status="Pass",
+            title=title,
+            result="The Documents folder is a normal local folder, not "
+                   "synced by OneDrive.",
+            observed=lines,
+            expected="GIS projects and geodatabases outside every "
+                     "OneDrive-synced tree.")
     return dict(
-        cid="DL-06", category="Storage", dataloss=True,
-        status="Fail" if redirected else "Pass",
-        title=("Documents redirected into OneDrive (Known Folder Move)"
-               if redirected else "Documents not redirected into OneDrive"),
+        cid="DL-06", category="Storage", dataloss=True, status="Fail",
+        title=title,
+        result="The Documents folder has been moved into OneDrive, so "
+               "anything saved under Documents, including Pro's default "
+               "project folder, is synced to the cloud.",
         observed=lines,
         expected="GIS projects and geodatabases outside every OneDrive-synced "
                  "tree. Esri does not support ArcGIS Pro against cloud-sync "
                  "storage.",
-        impact="S1, S2 and S3. OneDrive can lock or partially sync a "
-               "geodatabase component file mid-write while Pro expects "
-               "exclusive access, and Known Folder Move redirects Documents "
-               "silently, so a project saved there is cloud-synced without the "
-               "user choosing it.",
-        fix="Store projects under a plain local folder that is not redirected. "
-            "If Known Folder Move is managed centrally, request an exclusion "
-            "for the GIS working folder. --apply will not change redirection: "
-            "that is an organisation policy decision.")
+        impact="Esri does not support ArcGIS Pro on cloud-synced folders. "
+               "OneDrive can lock or half-sync a geodatabase file while Pro "
+               "is writing it, which causes freezes and lost edits.",
+        fix="Keep projects in a local folder outside OneDrive, such as "
+            "C:\\GIS\\Projects. If your organisation manages OneDrive "
+            "centrally, ask IT to exclude that folder. prostall will not "
+            "change this setting.")
 
 
 def decide_placeholders(roots, inspected, placeholders):
@@ -759,37 +803,42 @@ def decide_placeholders(roots, inspected, placeholders):
     placeholders and local copies stalls on every recall, and OneDrive can hold
     a lock on one of them while Pro writes another.
     """
+    title = "Online-only OneDrive files in project folders"
     if not roots:
         return dict(
             cid="DL-07", category="Storage", dataloss=True, status="Info",
-            measured=False,
-            title="Cloud placeholder (dehydrated) project files",
+            measured=False, title=title,
+            result="Could not check: no project folder was found to look in.",
             observed="No project folder was found to inspect, so placeholder "
                      "state was not measured this run.",
             expected="Any project folder fully local, with no Files-On-Demand "
                      "placeholders.",
-            impact="S1 and S2 undetermined.",
-            fix="If projects are stored elsewhere, check that folder for items "
-                "marked available when online.")
+            fix="If projects are kept somewhere else, look in that folder for "
+                "files with a cloud icon (\"available when online\").")
     if placeholders:
         return dict(
             cid="DL-07", category="Storage", dataloss=True, status="Warn",
-            title="Project tree contains cloud placeholders",
+            title=title,
+            result="%d file(s) in the project folders are online-only: "
+                   "OneDrive has to download them before Pro can read them."
+                   % len(placeholders),
             observed=(["%d placeholder item(s) in %d inspected "
                        "entries:" % (len(placeholders), inspected)]
                       + list(placeholders[:15])),
             expected="No dehydrated item anywhere Pro reads a project or a "
                      "geodatabase.",
-            impact="S1, S2 and S3. Recall stalls the draw, and a file OneDrive "
-                   "is rehydrating can be locked while Pro writes to it.",
-            fix="Mark the folder always keep on this device, or better, move "
-                "the projects out of the synced tree entirely.")
+            impact="Pro freezes while each file downloads, and OneDrive can "
+                   "lock a file while Pro is writing to it.",
+            fix="Move the projects out of OneDrive (see DL-05 and DL-06). "
+                "Until then, right-click the project folder and choose "
+                "\"Always keep on this device\".")
     return dict(
         cid="DL-07", category="Storage", dataloss=True, status="Pass",
-        title="Cloud placeholder (dehydrated) project files",
+        title=title,
+        result="No online-only files in the project folders.",
         observed="%d entries inspected under %s; no dehydrated item found."
                  % (inspected, "; ".join(roots)),
-        expected="No dehydrated items.", impact="None.", fix="None.")
+        expected="No dehydrated items.")
 
 
 def decide_offline_files(policy_value):
@@ -802,34 +851,45 @@ def decide_offline_files(policy_value):
     nobody could cross-check it, on a check that bears on data loss. Only the
     policy value states intent, so an unset policy is reported as unknown.
     """
+    title = "Windows Offline Files"
     if policy_value is None:
         return dict(
             cid="DL-08", category="Network", dataloss=True, status="Info",
-            measured=False,
-            title="Offline Files (CSC) state",
+            measured=False, title=title,
+            result="Could not check: no Offline Files policy is set, so "
+                   "whether it is on is unknown.",
             observed="No Offline Files policy value is set, so the cache state "
                      "could not be determined. The CSC service start value is "
                      "not used as a stand-in: it is boot-started on stock "
                      "Windows regardless of the cache, and inferring from it "
                      "produced a false warning.",
             expected="Offline Files disabled where geodatabases are accessed.",
-            impact="S3 undetermined.",
-            fix="Read it by hand: Control Panel > Sync Center > Manage offline "
-                "files.")
+            fix="Open Control Panel > Sync Center > Manage offline files and "
+                "see whether Offline Files is enabled.")
     enabled = bool(policy_value)
+    if not enabled:
+        return dict(
+            cid="DL-08", category="Network", dataloss=True, status="Pass",
+            title=title,
+            result="Offline Files is turned off.",
+            observed="The Offline Files cache is disabled by policy (value "
+                     "%s)." % policy_value,
+            expected="Disabled.")
     return dict(
-        cid="DL-08", category="Network", dataloss=True,
-        status="Warn" if enabled else "Pass",
-        title="Offline Files (CSC) on network project paths",
-        observed="The Offline Files cache is %s by policy (value %s)."
-                 % ("ENABLED" if enabled else "disabled", policy_value),
+        cid="DL-08", category="Network", dataloss=True, status="Warn",
+        title=title,
+        result="Offline Files is turned on. Windows may keep its own copies "
+               "of files from network drives.",
+        observed="The Offline Files cache is ENABLED by policy (value %s)."
+                 % policy_value,
         expected="Disabled. A cached copy of a geodatabase component file can "
                  "be served to Pro while the share holds a newer one.",
-        impact="S3. Stale reads and deferred writes on a network geodatabase "
-               "look exactly like vanished edits.",
-        fix="Control Panel > Sync Center > Manage offline files > disable, or "
-            "exclude the GIS shares by policy. Not auto-fixed: it is "
-            "machine-wide and may be required for other business data.")
+        impact="Pro can be handed an old copy of a geodatabase file, or have "
+               "its writes held back. Both look exactly like lost edits.",
+        fix="Ask IT to turn off Offline Files for the GIS network shares "
+            "(Control Panel > Sync Center > Manage offline files). It is a "
+            "machine-wide setting that other work may rely on, so prostall "
+            "does not change it.")
 
 
 def decide_crash(dumps, recent, wer_lines, wer_configured):
@@ -841,42 +901,41 @@ def decide_crash(dumps, recent, wer_lines, wer_configured):
     light on a value that was never going to exist that this tool exists to
     stop, so the empty branch reports what collection is configured instead.
     """
+    title = "ArcGIS Pro crash files"
     if dumps:
         return dict(
             cid="DL-09", category="ArcGISPro", dataloss=True,
             status="Warn" if recent else "Info",
-            title="ArcGIS Pro crash dumps (evidence of a force-close during an "
-                  "edit)",
+            title=title,
+            result="Found %d crash file(s) from ArcGIS Pro, %d from the last "
+                   "%d days." % (len(dumps), recent, CRASH_RECENT_DAYS),
             observed=dumps,
             expected="No recent ArcGIS Pro dump. A dump timestamped inside an "
                      "editing window is the moment the session died.",
-            impact="S3. Correlate each dump timestamp against the edit the "
-                   "editor says she lost. %d dump(s) in the last %d days."
-                   % (recent, CRASH_RECENT_DAYS),
-            fix="Keep the dumps for the support case; the filenames encode the "
-                "exact build. Purge them only after the case closes, because "
-                "Pro does not prune this folder.")
+            impact="Each crash file marks the moment Pro crashed. Compare the "
+                   "times with when the editor lost work.",
+            fix="Keep these files for the Esri support case; their names "
+                "identify the exact Pro build. Pro never deletes them, so "
+                "remove them only after the case is closed.")
     return dict(
         cid="DL-09", category="ArcGISPro", dataloss=True, status="Info",
-        title="No ArcGIS Pro crash dump found, and a force-close would not "
-              "produce one",
+        title=title,
+        result="No crash files found. This does not rule out a crash: "
+               "closing a frozen Pro from Task Manager leaves no crash file.",
         observed=wer_lines,
         expected="Dump collection configured for ArcGISPro.exe before the next "
                  "hang, so there is an artefact to timestamp.",
-        impact="S3. This check can neither confirm nor rule out a force-close. "
-               "A hang ended from Task Manager writes no minidump, so no dump "
-               "is absence of evidence, not evidence of health.",
-        fix=("Dump collection is configured; keep it. "
+        impact="Without a crash file there is no record of when Pro died.",
+        fix=("Crash file collection is already set up; keep it."
              if wer_configured else
-             "No dump collection is configured, so there will be no artefact "
-             "the next time this happens. Enable it under the Windows Error "
-             "Reporting LocalDumps key for ArcGISPro.exe, elevated. ")
-            + "Not auto-fixed: it is a machine-wide policy change and belongs "
-              "to whoever owns the image.")
+             "No dump collection is configured, so the next crash will leave "
+             "no record. Ask IT to turn on Windows Error Reporting crash dumps "
+             "(the LocalDumps registry key) for ArcGISPro.exe. It is a "
+             "machine-wide setting, so prostall does not change it."))
 
 
 def decide_tcp(cid, category, title, host, port, probe, warn_ms, impact, fix,
-               dataloss=False):
+               dataloss=False, flag="--sde-server"):
     """DL-10 and PF-19. One bounded TCP connect, reported honestly.
 
     probe: None when no host was given, else (open, elapsed_ms, error). open
@@ -889,33 +948,41 @@ def decide_tcp(cid, category, title, host, port, probe, warn_ms, impact, fix,
         return dict(
             cid=cid, category=category, dataloss=dataloss, status="Skipped",
             measured=False, title=title,
+            result="Not checked: no server name was given.",
             observed="No host was given, so nothing was measured this run. "
                      "Network probes are opt-in.",
-            expected="A reachable host.", impact="Undetermined.",
-            fix="Re-run naming the host to probe.")
+            expected="A reachable host.",
+            fix="To test it, run prostall again with %s <server name>."
+                % flag)
     opened, elapsed, error = probe
     if opened is None:
         return dict(
             cid=cid, category=category, dataloss=dataloss, status="Info",
             measured=False, title=title,
+            result="Could not check: the name %s was not found on the network."
+                   % host,
             observed="%s:%d did not resolve (%s), so the server was not "
                      "measured this run." % (host, port, error),
             expected="A host name that resolves.",
-            impact="Undetermined. A name that never resolved says nothing "
-                   "about the server's latency.",
-            fix="Check the spelling of the host name, the DNS suffix and the "
-                "VPN, then re-run.")
+            fix="Check the spelling of the server name and that the VPN is "
+                "connected, then run prostall again.")
     observed = "%s:%d open=%s elapsed=%d ms%s" % (
         host, port, opened, elapsed, (" (%s)" % error) if error else "")
     if not opened:
         status = "Fail"
+        result = ("%s did not answer on port %d within %d ms."
+                  % (host, port, elapsed))
     elif elapsed > warn_ms:
         status = "Warn"
+        result = ("%s answered, but slowly: %d ms (should be under %d ms)."
+                  % (host, elapsed, warn_ms))
     else:
         status = "Pass"
+        result = "%s answered in %d ms." % (host, elapsed)
+        impact = fix = ""
     return dict(
         cid=cid, category=category, dataloss=dataloss, status=status,
-        title=title, observed=observed,
+        title=title, result=result, observed=observed,
         expected="A TCP connect well inside %d ms. Connect only: no "
                  "credential is used." % warn_ms,
         impact=impact, fix=fix)
@@ -932,14 +999,15 @@ def decide_sde_files(paths, index_copies):
     .sdeold and .sdebak strays too, which inflated both this inventory and the
     index count that gates on it.
     """
+    title = "Database connection files (.sde)"
     if not paths:
         return dict(
             cid="DL-11", category="Geodatabase", dataloss=True, status="Info",
-            title="SDE connection files on this box",
+            title=title,
+            result="No database connection files were found.",
             observed="No connection file under the ESRI favorites or index "
                      "folders.",
-            expected="A small, curated set of connection files.",
-            impact="None.", fix="None.")
+            expected="A small, curated set of connection files.")
     lines = []
     risky = []
     for path, cls in paths:
@@ -949,22 +1017,34 @@ def decide_sde_files(paths, index_copies):
     status = "Info"
     if risky or index_copies >= INDEX_MANY_CONNECTIONS:
         status = "Warn"
+    if status == "Warn":
+        reasons = []
+        if index_copies >= INDEX_MANY_CONNECTIONS:
+            reasons.append("%d old copies are kept in Pro's search index"
+                           % index_copies)
+        if risky:
+            reasons.append("%d are stored off this computer" % len(risky))
+        result = ("Found %d connection files, more than needed: %s."
+                  % (len(paths), " and ".join(reasons)))
+    else:
+        result = "Found %d connection file(s)." % len(paths)
     return dict(
         cid="DL-11", category="Geodatabase", dataloss=True, status=status,
-        title="SDE connection files (paths only, contents never opened)",
+        title=title, result=result,
         observed=(["%d connection file(s); %d cached under the search index:"
                    % (len(paths), index_copies)] + lines[:40]),
         expected="One connection file per environment, stored locally, pointed "
                  "at the version the editor is supposed to edit. Stale copies "
                  "cached under the search index bloat the index and re-open "
                  "dead connections at startup.",
-        impact="S1, every connection re-enumerates the version list at open. "
-               "S3, editing through the wrong version is indistinguishable "
-               "from lost edits.",
-        fix="Prune the stale connection files. To force a clean rebuild, close "
-            "Pro and delete the contents of the ESRI ResourceIndex folder. "
-            "Never open or copy a connection file to inspect it: they carry "
-            "saved credentials.")
+        impact="Pro checks every connection when it starts, which slows "
+               "opening. With several to choose from, it is easy to edit "
+               "through the wrong version, which looks like lost edits.",
+        fix="Delete the connection files nobody uses, and keep one per "
+            "database. To clear the cached copies, close Pro and empty the "
+            "ESRI ResourceIndex folder. Never open or copy a connection "
+            "file to inspect it: they can contain saved passwords."
+            if status == "Warn" else "")
 
 
 def decide_pro_running(processes):
@@ -974,34 +1054,37 @@ def decide_pro_running(processes):
     not be read. None is not an empty list: an unreadable list reported as a
     closed Pro opened the project file and let the cache fix run.
     """
+    title = "ArcGIS Pro open during the check"
     if processes is None:
         return dict(
             cid="DL-12", category="ArcGISPro", dataloss=True, status="Info",
-            measured=False,
-            title="Whether ArcGIS Pro is running could not be determined",
+            measured=False, title=title,
+            result="Could not check whether ArcGIS Pro is open, so the "
+                   "project-file check and the cache fix were not run.",
             observed="The process list could not be read, so whether Pro is "
                      "running was not measured this run.",
             expected="A readable process list.",
-            impact="Blocks the cache fix and the project-file read, because "
-                   "neither is safe while Pro may be running.",
-            fix="Close Pro by hand, then re-run where tasklist can run.")
+            fix="Close ArcGIS Pro yourself, then run prostall again.")
     if processes:
         return dict(
             cid="DL-12", category="ArcGISPro", dataloss=True, status="Warn",
-            title="ArcGIS Pro is running during this diagnostic",
+            title=title,
+            result="ArcGIS Pro is open, so some checks and the cache fix "
+                   "could not run safely.",
             observed=processes,
             expected="Pro closed. Cache and index state cannot be cleared "
                      "safely while Pro holds it, and an open edit session must "
                      "be saved and closed first.",
-            impact="Blocks the cache fix, and any --apply cache action will be "
-                   "refused while it is true.",
-            fix="Have the editor save, close the edit session and exit Pro "
-                "before re-running with --apply.")
+            impact="While Pro is open, prostall will not read the project "
+                   "file or touch the cache, and --apply refuses the cache fix.",
+            fix="Ask the editor to save their edits, stop editing and close "
+                "ArcGIS Pro. Then run prostall again.")
     return dict(
         cid="DL-12", category="ArcGISPro", dataloss=True, status="Pass",
-        title="ArcGIS Pro is not running during this diagnostic",
+        title=title,
+        result="ArcGIS Pro is closed.",
         observed="No ArcGIS Pro process is running.",
-        expected="Pro closed.", impact="None.", fix="None.")
+        expected="Pro closed.")
 
 
 def decide_protemp(folders, temp_root):
@@ -1016,14 +1099,16 @@ def decide_protemp(folders, temp_root):
     holds content: an empty scratch geodatabase is a husk, a project file or a
     non-empty scratch table is unsaved work worth opening before deleting.
     """
+    title = "Leftover ArcGIS Pro session folders"
     if not folders:
         return dict(
             cid="PF-07", category="Cache", dataloss=True, status="Info",
-            title="Leftover ArcGIS Pro session folders",
+            title=title,
+            result="No leftover session folders, so there is no unsaved work "
+                   "to recover from them.",
             observed="No leftover session folder under %s, so there is no "
                      "unsaved scratch work to recover from one." % temp_root,
-            expected="None, or a few that can be inspected.",
-            impact="S3, no recovery lead here.", fix="None.")
+            expected="None, or a few that can be inspected.")
     lines = []
     with_work = []
     total = 0
@@ -1048,23 +1133,32 @@ def decide_protemp(folders, temp_root):
     status = "Info"
     if with_work or len(folders) >= PROTEMP_MANY:
         status = "Warn"
+    if with_work:
+        result = ("%d of %d leftover session folders may hold unsaved work "
+                  "from a session that ended unexpectedly."
+                  % (len(with_work), len(folders)))
+        fix = ("Before deleting anything, open the folders marked MAY HOLD "
+               "UNSAVED WORK and check them against the date the edits were "
+               "lost. After that, with Pro closed, delete session folders "
+               "older than a few days. prostall never deletes these, because "
+               "they may hold the last copy of the work.")
+    else:
+        result = ("%d leftover session folders, none holding work."
+                  % len(folders))
+        fix = ("With Pro closed, delete the ArcGISProTemp folders older than "
+               "a few days." if status == "Warn" else "")
     return dict(
         cid="PF-07", category="Cache", dataloss=True, status=status,
-        title="Leftover ArcGIS Pro session folders (possible unsaved scratch "
-              "work)",
+        title=title, result=result,
         observed=observed,
         expected="One per live session. Pro does not clean these up, so the "
                  "count is a rough session history and not a crash count - but "
                  "a folder from a session that died can still hold the scratch "
                  "project that session never saved.",
-        impact="S3. Any folder flagged as holding work is a recovery lead for "
-               "the vanished edits and must be inspected before it is deleted. "
-               "S1 marginally, disk churn, for the rest.",
-        fix="Open the flagged folders first and check the scratch project "
-            "against the incident date. Only then, with Pro closed, remove the "
-            "session folders older than a few days. Deliberately not "
-            "auto-fixed: deleting these is exactly how the last copy of "
-            "unsaved work disappears.",
+        impact="A folder from a session that crashed can still hold the "
+               "project that was never saved. It may be the only copy of the "
+               "lost work.",
+        fix=fix,
         detail=("Inspect first: " + "; ".join(with_work)) if with_work
                else "No folder holds a project file or a non-empty scratch "
                     "table.")
@@ -1078,29 +1172,34 @@ def decide_pro_version(version, real, build, install_dir, exe_version):
     A verdict would need a support matrix that goes stale, so this records the
     build for the case instead of grading it.
     """
+    title = "ArcGIS Pro version"
     if not version and not exe_version:
         return dict(
             cid="PF-04", category="ArcGISPro", status="Info", measured=False,
-            title="ArcGIS Pro version",
+            title=title,
+            result="Could not check: ArcGIS Pro was not found in the registry "
+                   "or on disk.",
             observed="The ArcGIS Pro registry key and the executable were both "
                      "absent, so the installed version could not be read.",
             expected="A resolvable installed version.",
-            impact="Symptoms cannot be mapped to version-specific behaviour.",
-            fix="Confirm Pro is installed for all users and re-run.")
+            fix="Confirm ArcGIS Pro is installed for all users, then run "
+                "prostall again.")
     return dict(
         cid="PF-04", category="ArcGISPro", status="Info",
-        title="ArcGIS Pro version and patch level",
+        title=title,
+        result="ArcGIS Pro %s is installed%s." % (
+            real or version or exe_version,
+            (", build %s" % build) if build else ""),
         observed=["Version = %s" % (version or "<absent>"),
                   "RealVersion = %s" % (real or "<absent>"),
                   "BuildNumber = %s" % (build or "<absent>"),
                   "InstallDir = %s" % (install_dir or "<absent>"),
                   "ArcGISPro.exe file version = %s" % (exe_version or "<absent>")],
         expected="The current patch for the installed release.",
-        impact="S4 and any driver-related draw stall: the default rendering "
-               "engine changed between releases, so which one is installed "
-               "decides whether a graphics fault is even in scope.",
-        fix="Record this version on the support case, and check for a released "
-            "patch for this build before changing any client setting.")
+        impact="Some display problems are specific to a Pro release, so "
+               "support will ask for this.",
+        fix="Note this version on any support case, and check whether Esri "
+            "has released a patch for it before changing settings.")
 
 
 def decide_rendering(config_path, settings):
@@ -1110,14 +1209,17 @@ def decide_rendering(config_path, settings):
     they are here so the report can be diffed against a workstation that is
     known to be fast.
     """
+    title = "Pro display settings"
     if not config_path:
         return dict(
             cid="PF-05", category="Display", status="Info", measured=False,
-            title="Pro rendering and display settings",
+            title=title,
+            result="Could not check: Pro's settings file (user.config) was "
+                   "not found for this account.",
             observed="No user.config was located, so the display settings "
                      "could not be read.",
-            expected="A readable user.config.", impact="S4 undetermined.",
-            fix="Read them in Pro: Project > Options > Display.")
+            expected="A readable user.config.",
+            fix="In Pro, open Project > Options > Display to see them.")
     names = ("RenderingEngine", "RenderingQuality", "EnableRenderingAntialiasing",
              "AntialiasingMode", "TextAntialiasingMode", "EnableVSync",
              "StereoscopicMode", "ManageFeatureCaching",
@@ -1128,15 +1230,19 @@ def decide_rendering(config_path, settings):
         status = "Warn"
     return dict(
         cid="PF-05", category="Display", status=status,
-        title="Pro rendering and display settings (read-only)",
+        title=title,
+        result=("Stereoscopic (3D) display mode is on (%s), which slows "
+                "drawing." % stereo if status == "Warn" else
+                "Display settings were read; nothing unusual found."),
         observed=[cfg_line(settings, n) for n in names],
         expected="A rendering engine matching a stable driver path for this "
                  "graphics adapter, stereoscopic mode off, feature caching on. "
                  "None of these cause edit loss.",
-        impact="S4, and general draw speed.",
-        fix="Change these through Project > Options > Display only. This tool "
-            "never writes user.config: Pro overwrites it on the next settings "
-            "save.",
+        impact="Makes maps draw more slowly. It does not affect saved data.",
+        fix=("In Pro, open Project > Options > Display and turn off "
+             "stereoscopic mode. Change display settings only there: Pro "
+             "overwrites any hand edit to user.config."
+             if status == "Warn" else ""),
         detail="Source: %s" % config_path)
 
 
@@ -1147,18 +1253,31 @@ def decide_caches(path, exists, total_bytes, files, oldest, oldest_age_days,
     Not a data-loss cause. It is the one folder that grows unattended and that
     Pro does not reliably purge, so it is the cheapest thing to fix first.
     """
+    title = "Pro local cache"
     if not exists:
         return dict(
             cid="PF-06", category="Cache", status="Info",
-            title="ESRI local cache size and staleness",
+            title=title,
+            result="There is no local cache folder yet.",
             observed="%s  <absent>" % path,
-            expected="Present, modest and self-clearing.",
-            impact="None.", fix="None.")
+            expected="Present, modest and self-clearing.")
     big, stale, ratio = cache_triggers(total_bytes, files, oldest_age_days,
                                        stale_files)
+    if big or stale:
+        why = []
+        if big:
+            why.append("is large (%s in %d files)"
+                       % (format_bytes(total_bytes), files))
+        if stale:
+            why.append("is mostly old files Pro no longer uses (%.0f%% older "
+                       "than %d days)" % (ratio * 100.0, CACHE_STALE_DAYS))
+        result = "The local cache %s." % " and ".join(why)
+    else:
+        result = ("The local cache is a normal size (%s)."
+                  % format_bytes(total_bytes))
     return dict(
         cid="PF-06", category="Cache", status="Warn" if (big or stale) else "Pass",
-        title="ESRI local cache size and staleness",
+        title=title, result=result,
         observed=[path,
                   "%s in %d files; oldest %s; %d cache file(s) older than %d days"
                   % (format_bytes(total_bytes), files, oldest, stale_files,
@@ -1168,12 +1287,13 @@ def decide_caches(path, exists, total_bytes, files, oldest, oldest_age_days,
         expected="A display and geoprocessing cache Pro is actually reusing, "
                  "not months of orphaned cache files. Pro does not reliably "
                  "purge these.",
-        impact="S1, slower startup, and gradual draw degradation. Not a "
-               "data-loss cause.",
-        fix="With Pro closed, move the cache folder aside and let Pro rebuild "
-            "it, or tick Project > Options > Display > clear the cache when "
-            "the application closes. --apply renames the folder aside and "
-            "prints the undo; it never deletes it.",
+        impact="A bloated cache slows Pro's start-up and map drawing over "
+               "time. It does not affect saved data.",
+        fix="With Pro closed, run prostall with --apply to move the cache "
+            "folder aside; Pro builds a fresh one on the next start. prostall "
+            "renames the folder and never deletes it, and prints the command "
+            "to undo. To stop it growing, tick \"Clear cache when the "
+            "application closes\" in Project > Options > Display.",
         autofixable=True)
 
 
@@ -1196,17 +1316,26 @@ def decide_index(res_bytes, res_files, connection_copies, status_stamp,
     status = "Info"
     if connection_copies >= INDEX_MANY_CONNECTIONS or network == "True":
         status = "Warn"
+    why = []
+    if network == "True":
+        why.append("indexes network folders")
+    if connection_copies >= INDEX_MANY_CONNECTIONS:
+        why.append("holds %d cached connection files" % connection_copies)
     return dict(
         cid="PF-08", category="ArcGISPro", status=status,
-        title="Project and catalog search index state",
+        title="Pro search index",
+        result=("Pro's search index %s, which slows start-up."
+                % " and ".join(why) if why else
+                "The search index settings look normal."),
         observed=lines,
         expected="Network-connection indexing off on a machine whose data is "
                  "on a share, and a handful of connection copies, not dozens.",
-        impact="S1. Indexing a network connection walks the share at startup "
-               "and during every incremental pass.",
-        fix="Project > Options > General > Search Index: turn off "
-            "network-connection indexing. To force a clean rebuild, close Pro "
-            "and delete the contents of the ResourceIndex folder.")
+        impact="Indexing network folders means Pro scans the share at every "
+               "start-up and again in the background.",
+        fix=("In Pro, open Project > Options > General > Search Index and "
+             "turn off indexing of network connections. To rebuild the index "
+             "from scratch, close Pro and empty the ESRI ResourceIndex folder."
+             if status == "Warn" else ""))
 
 
 def decide_gpu_preference(exe, value, readable=True):
@@ -1216,40 +1345,51 @@ def decide_gpu_preference(exe, value, readable=True):
     the integrated adapter. Setting it is one registry string, it is per-user,
     and it is exactly what the Graphics page of Settings writes.
     """
+    title = "Graphics card used by Pro"
     if not readable:
         return dict(
             cid="PF-11", category="Hardware", status="Info", measured=False,
-            title="Per-app GPU preference for ArcGIS Pro",
+            title=title,
+            result="Could not check: the Windows graphics setting could not "
+                   "be read.",
             observed="The registry could not be read on this platform, so the "
                      "graphics preference is unknown. An unreadable value is "
                      "not an absent one.",
             expected="%s, high performance." % GPU_PREFERENCE_WANTED,
-            impact="S4 undetermined.",
-            fix="Read it under Settings > System > Display > Graphics.")
+            fix="Look under Settings > System > Display > Graphics.")
     if not value:
         return dict(
             cid="PF-11", category="Hardware", status="Warn",
-            title="Per-app GPU preference for ArcGIS Pro",
+            title=title,
+            result="ArcGIS Pro is not set to use the high-performance "
+                   "graphics card, so Windows may give it the slower "
+                   "built-in one.",
             observed="No value named %s under %s, so Windows picks the adapter "
                      "automatically, which on a hybrid machine can mean the "
                      "integrated one." % (exe, GPU_PREFERENCE_KEY),
             expected="%s, high performance." % GPU_PREFERENCE_WANTED,
-            impact="S4 and slow draw. Not a data-loss cause.",
-            fix="Set it through Settings > System > Display > Graphics > high "
-                "performance, or let --apply write it and print the undo.",
+            impact="Maps draw slowly and may not redraw properly. It does not "
+                   "affect saved data.",
+            fix="Run prostall with --apply to set it (it prints the command to "
+                "undo), or set it yourself: Settings > System > Display > "
+                "Graphics > ArcGIS Pro > High performance.",
             autofixable=True)
     good = GPU_PREFERENCE_WANTED.rstrip(";") in value
     return dict(
         cid="PF-11", category="Hardware", status="Pass" if good else "Warn",
-        title="Per-app GPU preference for ArcGIS Pro",
+        title=title,
+        result=("ArcGIS Pro is set to use the high-performance graphics card."
+                if good else
+                "ArcGIS Pro is set to a graphics option other than high "
+                "performance (%s)." % value),
         observed="%s = %s" % (exe, value),
         expected="%s. 0 lets Windows decide, 1 is power saving and the "
                  "integrated adapter, 2 is high performance."
                  % GPU_PREFERENCE_WANTED,
-        impact="S4 and slow draw.",
-        fix="Set it through Settings > System > Display > Graphics, or let "
-            "--apply write it. On a discrete-only machine also confirm the "
-            "vendor control panel, which keeps a separate profile store.",
+        impact="" if good else "Maps draw more slowly.",
+        fix="Run prostall with --apply to set it, or set it yourself in "
+            "Settings > System > Display > Graphics. If the machine has only "
+            "one graphics card, also check the card maker's control panel.",
         autofixable=True)
 
 
@@ -1260,32 +1400,47 @@ def decide_memory(total_gb, free_gb):
     "Fail, total 0 GB" - a hardware verdict off a value nobody read, telling
     the operator to replace memory that is probably fine.
     """
+    title = "Memory (RAM)"
     if total_gb is None:
         return dict(
             cid="PF-12", category="Hardware", status="Info", measured=False,
-            title="Physical memory",
+            title=title,
+            result="Could not check: the amount of memory could not be read.",
             observed="Installed and free memory could not be read on this "
                      "platform, so no verdict is given. This is a failed read, "
                      "not a hardware finding.",
             expected="At least %.0f GB for enterprise editing." % MIN_MEMORY_GB,
-            impact="S1 and S2 undetermined.",
-            fix="Read it by hand from Task Manager and re-run.")
+            fix="Check the installed memory in Task Manager > Performance > "
+                "Memory.")
     if total_gb < MIN_MEMORY_GB:
         status = "Fail"
+        result = ("This computer has %.0f GB of memory; at least %.0f GB is "
+                  "recommended for editing." % (total_gb, MIN_MEMORY_GB))
+        fix = ("Ask IT to upgrade the memory to at least %.0f GB (%.0f GB is "
+               "comfortable)." % (MIN_MEMORY_GB, MIN_MEMORY_GB * 2))
     elif free_gb < LOW_FREE_MEMORY_GB:
         status = "Warn"
+        result = ("Only %.1f GB of %.0f GB memory was free during the check."
+                  % (free_gb, total_gb))
+        fix = ("Close other large programs (browsers, other GIS sessions) "
+               "while editing, and check Task Manager for what is using the "
+               "memory.")
     else:
         status = "Pass"
+        result = ("%.0f GB of memory, %.1f GB free." % (total_gb, free_gb))
+        fix = ""
     return dict(
         cid="PF-12", category="Hardware", status=status,
-        title="Physical memory",
+        title=title, result=result,
         observed="Total %.2f GB; free %.2f GB at the time of the check, which "
                  "is a live snapshot and not a specification."
                  % (total_gb, free_gb),
         expected="At least %.0f GB for enterprise editing; %.0f GB comfortable."
                  % (MIN_MEMORY_GB, MIN_MEMORY_GB * 2),
-        impact="S1 and S2 if the machine is paging during a draw.",
-        fix="None if adequate.")
+        impact="" if status == "Pass" else
+               "When memory runs short Windows swaps to disk, which makes Pro "
+               "slow to open and freeze while drawing.",
+        fix=fix)
 
 
 def decide_disk(volumes):
@@ -1293,18 +1448,19 @@ def decide_disk(volumes):
 
     volumes: (name, total_bytes, free_bytes).
     """
+    title = "Free disk space"
     if not volumes:
         return dict(
             cid="PF-13", category="Hardware", status="Info", measured=False,
-            title="Free disk space",
+            title=title,
+            result="Could not check: no drive could be read.",
             observed="No volume could be read, so free space was not measured "
                      "this run.",
             expected="At least %.0f GB and %.0f%% free."
                      % (MIN_FREE_DISK_GB, MIN_FREE_DISK_PCT),
-            impact="S1 and S2 undetermined.",
-            fix="Read it by hand and re-run.")
+            fix="Check free space in File Explorer > This PC.")
     lines = []
-    low = False
+    low = []
     for name, total, free in volumes:
         free_gb = free / float(1024 ** 3)
         total_gb = total / float(1024 ** 3)
@@ -1312,18 +1468,23 @@ def decide_disk(volumes):
         lines.append("%s %.2f GB free of %.2f GB (%.1f%%)"
                      % (name, free_gb, total_gb, pct))
         if free_gb < MIN_FREE_DISK_GB or pct < MIN_FREE_DISK_PCT:
-            low = True
+            low.append("%s has %.1f GB free" % (name.rstrip("\\"), free_gb))
     return dict(
         cid="PF-13", category="Hardware", status="Warn" if low else "Pass",
-        title="Free disk space on the system and project volumes",
+        title=title,
+        result=("Low disk space: %s (at least %.0f GB is recommended)."
+                % ("; ".join(low), MIN_FREE_DISK_GB) if low else
+                "Enough free disk space on every drive checked."),
         observed=lines,
         expected="At least %.0f GB and %.0f%% free on the volume holding the "
                  "caches, the scratch workspace and any local project."
                  % (MIN_FREE_DISK_GB, MIN_FREE_DISK_PCT),
-        impact="S1 and S2. A full volume stalls the display cache and the "
-               "geoprocessing scratch workspace.",
-        fix="Clear the local cache and the leftover session folders first. "
-            "They are the two that grow unattended.")
+        impact="" if not low else
+               "Pro needs free space for its cache and for geoprocessing. A "
+               "nearly full drive makes it slow and can make it freeze.",
+        fix="" if not low else
+            "Free up space. Start with Pro's local cache (PF-06) and old "
+            "session folders (PF-07), which grow on their own.")
 
 
 def decide_power_plan(guid, name):
@@ -1333,31 +1494,37 @@ def decide_power_plan(guid, name):
     window in which a save can time out, and a timed-out save is how an edit
     ends up stranded.
     """
+    title = "Power plan"
     if not guid:
         return dict(
             cid="PF-15", category="System", status="Info", measured=False,
-            title="Active power plan",
+            title=title,
+            result="Could not check: the active power plan could not be read.",
             observed="The active power scheme could not be parsed, so no "
                      "verdict is given.",
             expected="High performance, or a balanced plan with no processor "
                      "cap while on mains power.",
-            impact="S1 and S2 undetermined.",
-            fix="Read it in Control Panel > Power Options.")
+            fix="Look in Control Panel > Power Options.")
     high = (guid.lower() == HIGH_PERFORMANCE_PLAN
             or bool(re.search(r"high performance|ultimate", name or "",
                               re.IGNORECASE)))
     return dict(
         cid="PF-15", category="System", status="Pass" if high else "Warn",
-        title="Active power plan",
+        title=title,
+        result=("The power plan is \"%s\"." % name if high else
+                "The power plan is \"%s\", which can slow the processor down "
+                "to save power." % (name or "unnamed")),
         observed="%s  (%s)" % (name or "<unnamed>", guid),
         expected="High performance while docked, so the processor is not "
                  "parked during a long draw or a long save.",
-        impact="S1 and S2. Not a data-loss cause on its own, but a throttled "
-               "processor lengthens the window in which a save can time out.",
-        fix="Switch the active plan to high performance. Some managed images "
-            "hide that plan; then raise the processor minimum and maximum "
-            "state on the active plan instead. Not auto-fixed: it is a "
-            "machine-wide setting and may be set by policy.")
+        impact="" if high else
+               "A slowed processor makes Pro slower to open and draw, and "
+               "gives a save longer to time out.",
+        fix="" if high else
+            "Switch to the High performance power plan in Control Panel > "
+            "Power Options. If that plan is hidden by your organisation, ask "
+            "IT to raise the minimum processor state instead. It is a "
+            "machine-wide setting, so prostall does not change it.")
 
 
 def decide_roaming(roaming_configured, esri_bytes, esri_files):
@@ -1367,30 +1534,38 @@ def decide_roaming(roaming_configured, esri_bytes, esri_files):
     and the first-launch delay, and is one of the quieter reasons a machine is
     slow only in the morning.
     """
+    title = "Roaming profile"
     if roaming_configured is None:
         return dict(
             cid="PF-26", category="System", status="Info", measured=False,
-            title="Roaming profile carrying the ESRI settings folder",
+            title=title,
+            result="Could not check whether this account uses a roaming "
+                   "profile.",
             observed=["The roaming profile state could not be read.",
                       "Roaming ESRI folder = %s in %d files"
                       % (format_bytes(esri_bytes), esri_files)],
             expected="The roaming ESRI folder excluded from the roaming "
                      "profile, or a local profile.",
-            impact="S1 undetermined.",
-            fix="Read it by hand from the user profile settings.")
+            fix="Ask IT whether this account uses a roaming profile.")
     return dict(
         cid="PF-26", category="System",
         status="Warn" if roaming_configured else "Pass",
-        title="Roaming profile carrying the ESRI settings folder",
+        title=title,
+        result=("This account uses a roaming profile, and it copies Pro's "
+                "settings folder (%s) at every sign-in and sign-out."
+                % format_bytes(esri_bytes) if roaming_configured else
+                "This account does not use a roaming profile."),
         observed=["RoamingConfigured = %s" % roaming_configured,
                   "Roaming ESRI folder = %s in %d files"
                   % (format_bytes(esri_bytes), esri_files)],
         expected="The roaming ESRI folder excluded from the roaming profile, "
                  "or a local profile.",
-        impact="S1. A roamed ESRI folder is copied down at logon and up at "
-               "logoff, adding to both the logon time and the first launch.",
-        fix="Exclude the roaming and local ESRI folders from the roaming "
-            "profile by policy, or point Pro at a local settings location.")
+        impact="" if not roaming_configured else
+               "Sign-in and the first Pro start of the day are slower, "
+               "because the folder is copied down from the server first.",
+        fix="" if not roaming_configured else
+            "Ask IT to exclude the ESRI folders (in AppData\\Roaming and "
+            "AppData\\Local) from the roaming profile.")
 
 
 def decide_symbology(feature_caching):
@@ -1403,7 +1578,9 @@ def decide_symbology(feature_caching):
     """
     return dict(
         cid="PF-27", category="Display", status="Info",
-        title="Symbology not refreshing after a field calculation (S4)",
+        title="Map not redrawing after a field calculation",
+        result="No setting controls this, so there is nothing to check. "
+               "It is a known Pro display issue.",
         observed="ManageFeatureCaching = %s. No client setting was found that "
                  "governs symbology invalidation after an attribute edit made "
                  "outside the map, and none is invented here."
@@ -1412,12 +1589,12 @@ def decide_symbology(feature_caching):
                  "the in-memory feature cache, and closing and reopening the "
                  "map pane discards that cache, which is why that workaround "
                  "works.",
-        impact="S4 only. This is a display-refresh behaviour and does not mean "
-               "the attribute change was lost. Verify the value in the table "
-               "before treating it as data loss.",
-        fix="The workaround stays manual: refresh the map, or close and reopen "
-            "the map pane. Report it with the build number from PF-04 and a "
-            "Diagnostic Monitor trace. It is a client defect, not a setting.")
+        impact="If the map does not update after a field calculation, the "
+               "data is still saved: this does not mean the change was lost. "
+               "Check the value in the attribute table before treating it as "
+               "lost data.",
+        fix="If it happens, refresh the map, or close and reopen the map "
+            "pane. Report it to Esri with the Pro version (PF-04).")
 
 
 # ------------------------------------------------ the causes added in 1.6
@@ -1441,28 +1618,29 @@ def decide_nic(adapters, error):
     even beside an adapter that reads Disabled. Pass on a partial reading is
     a verdict about a device nobody measured.
     """
+    title = "Network adapter power saving"
+    by_hand = ("Open Device Manager, open each network adapter, and on the "
+               "Power Management tab check \"Allow the computer to turn off "
+               "this device to save power\".")
     if error is not None:
         return dict(
             cid="DL-04", category="Network", dataloss=True, status="Info",
-            measured=False,
-            title="Network adapter power management",
+            measured=False, title=title,
+            result="Could not check: the list of network adapters could not "
+                   "be read.",
             observed="The adapter list could not be read: %s" % error,
             expected="Allow the computer to turn off this device: Disabled on "
                      "every adapter that carries the database session.",
-            impact="S2 and S3 undetermined.",
-            fix="Read it by hand: Device Manager > the adapter > Power "
-                "Management.")
+            fix=by_hand)
     if not adapters:
         return dict(
             cid="DL-04", category="Network", dataloss=True, status="Info",
-            measured=False,
-            title="Network adapter power management",
+            measured=False, title=title,
+            result="Could not check: no connected network adapter was found.",
             observed="No physical adapter reported up, so the power setting "
                      "could not be determined.",
             expected="At least one physical adapter up.",
-            impact="S2 and S3 undetermined.",
-            fix="Read it by hand: Device Manager > the adapter > Power "
-                "Management.")
+            fix=by_hand)
     lines = []
     enabled = []
     unknown = []
@@ -1476,38 +1654,40 @@ def decide_nic(adapters, error):
     if enabled:
         return dict(
             cid="DL-04", category="Network", dataloss=True, status="Warn",
-            title="Windows may turn the network adapter off to save power",
+            title=title,
+            result="Windows is allowed to switch off the network adapter "
+                   "(%s) to save power." % ", ".join(enabled),
             observed=lines,
             expected="Disabled on every adapter that carries the database "
                      "session.",
-            impact="S2 and S3. With this on, Windows may power the adapter "
-                   "down, and an edit session left open across that loses its "
-                   "connection to the database.",
-            fix="Device Manager > %s > Power Management > clear Allow the "
-                "computer to turn off this device to save power. Not "
-                "auto-fixed: it is a machine-wide device setting and needs an "
-                "administrator." % enabled[0],
+            impact="If Windows switches the adapter off during an edit "
+                   "session, Pro loses its connection to the database and "
+                   "unsaved edits can be lost.",
+            fix="Ask IT (it needs administrator rights) to open Device "
+                "Manager > %s > Power Management and clear \"Allow the "
+                "computer to turn off this device to save power\"."
+                % " and ".join(enabled),
             detail="Adapters to change: %s" % ", ".join(enabled))
     if unknown:
         return dict(
             cid="DL-04", category="Network", dataloss=True, status="Info",
-            measured=False,
-            title="Network adapter power management",
+            measured=False, title=title,
+            result="Could not check every adapter: the setting could not be "
+                   "read for %s." % ", ".join(unknown),
             observed=lines + ["The setting could not be read for %d adapter(s), "
                               "so a Pass here would be a guess."
                               % len(unknown)],
             expected="A readable setting on every adapter that is up. The "
                      "provider often answers nothing for a docking or USB "
                      "adapter, or when the session is not elevated.",
-            impact="S2 and S3 undetermined.",
-            fix="Re-run elevated, or read it in Device Manager > the adapter "
-                "> Power Management.")
+            fix="Run prostall again as administrator, or check by hand: "
+                + by_hand)
     return dict(
         cid="DL-04", category="Network", dataloss=True, status="Pass",
-        title="Windows will not turn the network adapter off to save power",
+        title=title,
+        result="Windows will not switch off any network adapter to save power.",
         observed=lines,
-        expected="Disabled or unsupported on every adapter that is up.",
-        impact="None.", fix="None.")
+        expected="Disabled or unsupported on every adapter that is up.")
 
 
 # The timeline row text that marks an SMB client event. decide_events tells
@@ -1588,6 +1768,7 @@ def decide_events(rows, unreadable, queried, capped):
     event cap. No event is never Pass: a hang the editor waits out leaves no
     event at all, so an empty window is absence of evidence.
     """
+    title = "Crashes and freezes in the Windows event log"
     lines = ["Window: the last %d days, newest first, times in UTC."
              % EVENT_WINDOW_DAYS]
     for log, reason in unreadable:
@@ -1609,18 +1790,18 @@ def decide_events(rows, unreadable, queried, capped):
     if serious:
         return dict(
             cid="DL-13", category="System", dataloss=True, status="Warn",
-            title="Event timeline: Pro hangs, crashes or dirty shutdowns are "
-                  "recorded on this machine",
+            title=title,
+            result="The event log records %d Pro crash, freeze or unexpected "
+                   "shutdown event(s) in the last %d days."
+                   % (len(serious), EVENT_WINDOW_DAYS),
             observed=lines,
             expected="No ArcGIS Pro crash or hang, and no unexpected shutdown, "
                      "during editing hours.",
-            impact="S2 and S3. This is the wall-clock evidence. A hang ended "
-                   "from Task Manager writes no dump (DL-09), but it can leave "
-                   "an Application Hang event, and its time is the moment the "
-                   "edit session died.",
-            fix="Give these times to the editor and to the support case, and "
-                "lay them beside the edit she says she lost. Read-only: "
-                "nothing is cleared.",
+            impact="These times show when a Pro session ended without "
+                   "saving. A freeze closed from Task Manager leaves no crash "
+                   "file (DL-09), but it does leave one of these events.",
+            fix="Compare the times listed under DL-13 with when the editor "
+                "lost work, and include them in any support case.",
             detail="Sources: Application (Application Error 1000, Application "
                    "Hang 1002, naming ArcGISPro.exe); System (Kernel-Power "
                    "41, EventLog 6008); SMB client connectivity warnings and "
@@ -1631,35 +1812,37 @@ def decide_events(rows, unreadable, queried, capped):
         # machine is a verdict the logs did not produce.
         return dict(
             cid="DL-13", category="System", dataloss=True, status="Info",
-            title="Event timeline: only SMB client connectivity events in "
-                  "the window",
+            title=title,
+            result="No Pro crash or freeze recorded, only network file-share "
+                   "(SMB) connection events.",
             observed=lines + [quiet_note],
             expected="No ArcGIS Pro crash or hang, and no unexpected "
                      "shutdown.",
-            impact="S2 and S3. SMB connectivity events can precede a stall "
-                   "on a share, but their ids are not interpreted here.",
-            fix="Lay these times beside the edit she says she lost. If a "
-                "project is on a share, read PF-02 and PF-03 as well.")
+            impact="Network file-share connection problems can come before a "
+                   "freeze on a project stored on a share.",
+            fix="Compare these times with when the editor lost work. If a "
+                "project is on a network share, see PF-02 and PF-03 too.")
     if len(unreadable) == queried:
         return dict(
             cid="DL-13", category="System", dataloss=True, status="Info",
-            measured=False,
-            title="Event timeline",
+            measured=False, title=title,
+            result="Could not check: the Windows event logs could not be read.",
             observed=lines + ["No log could be read, so the timeline was not "
                               "measured this run."],
             expected="Readable Application and System logs.",
-            impact="S2 and S3 undetermined.",
-            fix="Read the same events in Event Viewer, or re-run where the "
-                "logs are readable.")
+            fix="Open Event Viewer and look in the Application and System "
+                "logs for ArcGIS Pro errors and unexpected shutdowns.")
     lines.append(quiet_note)
     return dict(
         cid="DL-13", category="System", dataloss=True, status="Info",
-        title="Event timeline: nothing recorded in the window",
+        title=title,
+        result="Nothing recorded in the last %d days. This does not rule out "
+               "a freeze: one that the editor waited out leaves no event."
+               % EVENT_WINDOW_DAYS,
         observed=lines,
         expected="No ArcGIS Pro crash or hang, and no unexpected shutdown.",
-        impact="S2 and S3. Absence of an event is absence of evidence.",
-        fix="If the incident is older than the window, read the same events "
-            "from an archived log instead.")
+        fix="If the lost edits are older than %d days, look for the same "
+            "events in an archived log." % EVENT_WINDOW_DAYS)
 
 
 def decide_smb(config, error, share_projects):
@@ -1669,15 +1852,17 @@ def decide_smb(config, error, share_projects):
     when a recent project actually lives on a share; otherwise the setting
     is recorded for the diff and decides nothing.
     """
+    title = "Network file-share (SMB) settings"
     if config is None:
         return dict(
             cid="PF-02", category="Network", status="Info", measured=False,
-            title="SMB client configuration",
+            title=title,
+            result="Could not check: the file-share settings could not be "
+                   "read.",
             observed="The SMB client configuration could not be read: %s"
                      % error,
             expected="A readable SMB client configuration.",
-            impact="S1 and S2 undetermined.",
-            fix="Read it by hand with Get-SmbClientConfiguration.")
+            fix="Run Get-SmbClientConfiguration in PowerShell to see them.")
     names = ("EnableMultiChannel", "RequireSecuritySignature",
              "DirectoryCacheLifetime", "FileInfoCacheLifetime",
              "SessionTimeout")
@@ -1688,13 +1873,18 @@ def decide_smb(config, error, share_projects):
         status = "Warn"
     return dict(
         cid="PF-02", category="Network", status=status,
-        title="SMB client configuration (read-only)",
+        title=title,
+        result=("SMB Multichannel, a Windows feature that speeds up network "
+                "shares, is turned off, and %d recent project(s) are on a "
+                "share." % share_projects if status == "Warn" else
+                "File-share settings were read; nothing unusual found."),
         observed=lines,
         expected="Multichannel on, which is the Windows default, wherever a "
                  "project is opened from a share.",
-        impact="S1 and S2 when a project or geodatabase is on a share.",
-        fix="Multichannel is a machine-wide network setting. Raise it with "
-            "the desktop or network team. Not auto-fixed.")
+        impact="Projects on a network share open and save more slowly.",
+        fix=("Ask the desktop or network team to turn SMB Multichannel back "
+             "on (it is the Windows default). It is a machine-wide setting, "
+             "so prostall does not change it." if status == "Warn" else ""))
 
 
 def decide_share_latency(rows, omitted=0):
@@ -1705,13 +1895,16 @@ def decide_share_latency(rows, omitted=0):
     keeps a fast reading from becoming a Pass, the same rule DL-04 follows:
     the unreadable folder is the likely culprit.
     """
+    title = "Network share speed"
     if not rows:
         return dict(
             cid="PF-03", category="Network", status="Info",
-            title="Directory listing time on the project share",
+            title=title,
+            result="No recent project is on a network share, so there was "
+                   "nothing to time.",
             observed="No recent project lives on a share, so there was no "
                      "share folder to time.",
-            expected="Projects on a local disk.", impact="None.", fix="None.")
+            expected="Projects on a local disk.")
     lines = []
     timed = []
     for folder, elapsed, entries, error in rows:
@@ -1726,12 +1919,14 @@ def decide_share_latency(rows, omitted=0):
     if not timed:
         return dict(
             cid="PF-03", category="Network", status="Info", measured=False,
-            title="Directory listing time on the project share",
+            title=title,
+            result="Could not check: no project folder on the share could be "
+                   "opened.",
             observed=lines + ["No share folder could be listed, so the latency "
                               "was not measured this run."],
             expected="A listable project folder.",
-            impact="S1 undetermined.",
-            fix="Check that the share is reachable from this session.")
+            fix="Check that the network share opens in File Explorer from "
+                "this account.")
     worst = max(timed)
     if worst >= SHARE_LIST_FAIL_MS:
         status = "Fail"
@@ -1740,25 +1935,37 @@ def decide_share_latency(rows, omitted=0):
     elif len(timed) < len(rows):
         return dict(
             cid="PF-03", category="Network", status="Info", measured=False,
-            title="Directory listing time on the project share",
+            title=title,
+            result="Could not check every share: at least one project folder "
+                   "could not be opened.",
             observed=lines + ["At least one share folder could not be listed, "
                               "so a Pass here would be a guess."],
             expected="A listable project folder.",
-            impact="S1 undetermined.",
-            fix="Check that every share folder is reachable from this "
-                "session.")
+            fix="Check that every project folder on the share opens in File "
+                "Explorer from this account.")
     else:
         status = "Pass"
+    if status == "Pass":
+        result = ("Listing a project folder on the share took %d ms, which is "
+                  "fine." % worst)
+    else:
+        result = ("Listing a project folder on the share took %d ms (should be "
+                  "under %d ms). Pro does this many times while opening a "
+                  "project." % (worst, SHARE_LIST_WARN_MS))
     return dict(
         cid="PF-03", category="Network", status=status,
-        title="Directory listing time on the project share",
+        title=title, result=result,
         observed=lines,
         expected="One listing of at most %d entries well under %d ms. Pro "
                  "lists folders many times while it opens a project."
                  % (SHARE_LIST_LIMIT, SHARE_LIST_WARN_MS),
-        impact="S1. Every folder listing Pro makes at open pays this.",
-        fix="Copy the working project to a local disk for active editing. If "
-            "the share must be used, give the network team this number.")
+        impact="" if status == "Pass" else
+               "Every folder Pro opens on the share costs this long, so "
+               "projects open slowly.",
+        fix="" if status == "Pass" else
+            "Copy the project to a folder on this computer for editing (see "
+            "DL-05). If it has to stay on the share, give this time to the "
+            "network team.")
 
 
 def _pattern_covers(pattern, target, same_depth=False):
@@ -1802,15 +2009,18 @@ def decide_defender(prefs, error, base_paths, pro_exe, system_env):
     never compared as a path: compared, it reported every baseline folder
     missing on a machine that may already exclude them all.
     """
+    title = "Antivirus exclusions (Microsoft Defender)"
     if prefs is None:
         return dict(
             cid="PF-17", category="Security", status="Info", measured=False,
-            title="Microsoft Defender exclusions for ArcGIS Pro",
+            title=title,
+            result="Could not check: the Defender settings could not be read. "
+                   "Another antivirus product may be in use.",
             observed="The Defender preferences could not be read: %s. Another "
                      "product may be the scanner here." % error,
             expected="A readable Defender configuration.",
-            impact="S1 and S2 undetermined.",
-            fix="Ask the security team which product scans on access here.")
+            fix="Ask the security team which antivirus product scans files "
+                "on this computer.")
     paths = [p for p in as_list(prefs.get("ExclusionPath")) if p]
     procs = [p for p in as_list(prefs.get("ExclusionProcess")) if p]
     lines = ["DisableRealtimeMonitoring = %s"
@@ -1820,37 +2030,42 @@ def decide_defender(prefs, error, base_paths, pro_exe, system_env):
     if [p for p in paths + procs if DEFENDER_SENTINEL.search("%s" % p)]:
         return dict(
             cid="PF-17", category="Security", status="Info", measured=False,
-            title="Microsoft Defender exclusions are hidden from this session",
+            title=title,
+            result="Could not check: Defender only shows its exclusions to "
+                   "an administrator.",
             observed=lines + ["Defender put \"N/A: Must be an administrator "
                               "to view exclusions\" where each list should "
                               "be, so what is excluded could not be "
                               "determined. Baseline that would be checked:"]
                      + ["  " + b for b in baseline],
             expected="A read that returns the real lists.",
-            impact="S1 and S2 undetermined. Nothing here says the baseline is "
-                   "missing.",
-            fix="Re-run elevated, or ask the security team for the list. Do "
-                "not request exclusions off this run: it never saw what is "
-                "already configured.")
+            impact="This does not mean the exclusions are missing.",
+            fix="Run prostall again as administrator, or ask the security "
+                "team for the exclusion list. Do not request new exclusions "
+                "based on this run: it could not see the existing ones.")
     if prefs.get("DisableRealtimeMonitoring") is True:
         return dict(
             cid="PF-17", category="Security", status="Info",
-            title="Defender real-time scanning is off",
+            title=title,
+            result="Defender real-time scanning is off, so its exclusions do "
+                   "not matter. Another antivirus product may be scanning "
+                   "instead.",
             observed=lines,
             expected="Exclusions decide nothing while real-time scanning is "
                      "off. Another product may be scanning instead.",
-            impact="None from Defender.",
-            fix="Ask the security team which product scans on access here.")
+            fix="Ask the security team which antivirus product scans files "
+                "on this computer.")
     if prefs.get("HideExclusionsFromLocalAdmins") is True and not paths:
         return dict(
             cid="PF-17", category="Security", status="Info", measured=False,
-            title="Microsoft Defender exclusions are hidden by policy",
+            title=title,
+            result="Could not check: a policy hides the Defender exclusion "
+                   "list.",
             observed=lines + ["HideExclusionsFromLocalAdmins = True and no "
                               "list came back, so what is excluded could not "
                               "be determined."],
             expected="A read that returns the real lists.",
-            impact="S1 and S2 undetermined.",
-            fix="Ask the security team for the configured list.")
+            fix="Ask the security team for the exclusion list.")
     expanded = [defender_expand(p, system_env) for p in paths
                 if "\\:{" not in p]
     missing = [b for b in base_paths
@@ -1867,21 +2082,30 @@ def decide_defender(prefs, error, base_paths, pro_exe, system_env):
     lines.extend(["NOT EXCLUDED  path     %s" % m for m in missing])
     if not proc_ok:
         lines.append("NOT EXCLUDED  process  %s" % pro_exe)
+    gaps = len(missing) + (0 if proc_ok else 1)
     return dict(
         cid="PF-17", category="Security",
-        status="Warn" if (missing or not proc_ok) else "Pass",
-        title="Microsoft Defender exclusions for ArcGIS Pro",
+        status="Warn" if gaps else "Pass",
+        title=title,
+        result=("Defender scans %d of the folders or programs ArcGIS Pro "
+                "uses most (marked NOT EXCLUDED below)." % gaps if gaps else
+                "Defender already skips the folders and program ArcGIS Pro "
+                "uses most."),
         observed=lines,
         expected="The Pro install folder and the editor's ESRI folders "
                  "excluded, and ArcGISPro.exe excluded as a process. This "
                  "baseline is this tool's, not an Esri list: review it against "
                  "the organisation's antivirus standard.",
-        impact="S1 and S2 when on-access scanning is what is slow. Prove it "
-               "first with the Defender performance analyzer.",
-        fix="Ask the security team to review the folders marked NOT EXCLUDED. "
-            "Defender expands a variable in an exclusion as LocalSystem, so "
-            "%APPDATA% there is not the editor's folder: give the real path. "
-            "Not auto-fixed: exclusions are a security decision.")
+        impact="" if not gaps else
+               "Scanning every file Pro opens can make it slow to start and "
+               "draw. Confirm this first with the Defender performance "
+               "analyzer.",
+        fix="" if not gaps else
+            "Ask the security team to review the items marked NOT EXCLUDED "
+            "under PF-17. Give them full paths, not %APPDATA%: Defender reads "
+            "variables as the system account, so %APPDATA% does not point at "
+            "the editor's folder. Exclusions are a security decision, so "
+            "prostall does not change them.")
 
 
 def scan_aprx(path, texts, onedrive, network_drives=()):
@@ -1942,11 +2166,16 @@ def decide_aprx(pro_state, projects, omitted=0):
     not be opened, each with "truncated". omitted: how many older recent
     projects the cap left unread.
     """
-    title = "Layer refresh timers and default geodatabase (read from the .aprx)"
+    title = "Layer refresh timers and default geodatabase"
     if pro_state != "closed":
         return dict(
             cid="PF-22", category="ArcGISPro", status="Info", measured=False,
             title=title,
+            result="Not checked: %s, and reading the project file while Pro "
+                   "might save it is not safe."
+                   % ("ArcGIS Pro is open" if pro_state == "running"
+                      else "prostall could not tell whether ArcGIS Pro is "
+                           "open"),
             observed="No project file was opened: %s, and reading one holds "
                      "it open while Pro may be saving it. The project file "
                      "was not measured this run."
@@ -1955,17 +2184,17 @@ def decide_aprx(pro_state, projects, omitted=0):
                              "determined"),
             expected="Pro closed, so the project can be read without "
                      "contending with a save.",
-            impact="S2 undetermined.",
-            fix="Have the editor save and exit Pro, then re-run. Until then "
-                "check each layer's refresh interval by hand.")
+            fix="Close ArcGIS Pro and run prostall again. Until then, check "
+                "each layer's refresh interval in its Properties.")
     if not projects:
         return dict(
             cid="PF-22", category="ArcGISPro", status="Info", measured=False,
             title=title,
+            result="Could not check: no recent project was found to read.",
             observed="No recent project was found, so no project file was "
                      "read.",
-            expected="A recent project to read.", impact="S2 undetermined.",
-            fix="Check each layer's refresh interval by hand.")
+            expected="A recent project to read.",
+            fix="Check each layer's refresh interval in its Properties.")
     lines = []
     hits = []
     remote_gdb = []
@@ -1998,24 +2227,40 @@ def decide_aprx(pro_state, projects, omitted=0):
                          "full")
     if omitted:
         lines.append("%d older recent project(s) were not read." % omitted)
-    if hits or remote_gdb:
+    found = []
+    steps = []
+    if hits:
+        found.append("%d layer(s) refresh on a timer" % len(hits))
+        steps.append("In each layer listed under PF-22, open Properties and "
+                     "clear the refresh interval.")
+    if remote_gdb:
+        found.append("the default geodatabase is not on this computer")
+        steps.append("Point the project's default geodatabase at a folder on "
+                     "this computer.")
+    if found:
         status = "Warn"
+        result = "In the recent projects, %s." % " and ".join(found)
     elif incomplete:
         status = "Info"
+        result = ("Could not read every project file in full; no refresh "
+                  "timers were found in the parts that were read.")
     else:
         status = "Pass"
+        result = ("No layer refreshes on a timer, and the default "
+                  "geodatabase is on this computer.")
     return dict(
         cid="PF-22", category="ArcGISPro", status=status, title=title,
+        result=result,
         observed=lines,
         expected="No layer on a refresh timer against a slow source, and the "
                  "default geodatabase on a local disk.",
-        impact="S2. A layer with a refresh interval re-queries on a timer "
-               "with nobody touching the map, which is a stall the editor "
-               "reads as the project refreshing. A default geodatabase on a "
-               "share pays the share on every geoprocessing write.",
-        fix="Clear the refresh interval in the properties of each layer "
-            "listed, and point the default geodatabase at a local "
-            "folder. This tool never writes the project file.",
+        impact="" if status != "Warn" else
+               "A layer with a refresh timer re-queries its data every few "
+               "seconds even when nobody touches the map, which feels like the "
+               "project freezing. A default geodatabase on a network share "
+               "slows every geoprocessing tool.",
+        fix=" ".join(steps + ["prostall never edits the project file."])
+            if steps else "",
         detail=("Not read in full: " + "; ".join(incomplete)) if incomplete
                else "Every project listed was read in full.")
 
@@ -2229,6 +2474,30 @@ class Env(object):
 
     def rename(self, src, dst):
         os.rename(src, dst)
+
+    def open_file(self, path):
+        """Open a file with its default program. None, or why it could not.
+
+        Off Windows it opens only when there is a desktop to open it on: with
+        no display, a text-mode browser could take over the terminal.
+        """
+        path = os.path.abspath(path)
+        try:
+            if self.windows:
+                os.startfile(path)
+                return None
+            if sys.platform == "darwin":
+                argv = ["open", path]
+            elif self.getenv("DISPLAY") or self.getenv("WAYLAND_DISPLAY"):
+                argv = ["xdg-open", path]
+            else:
+                return "there is no desktop session to open it in"
+            import subprocess
+            devnull = open(os.devnull, "wb")
+            subprocess.Popen(argv, stdout=devnull, stderr=devnull)
+            return None
+        except (OSError, AttributeError) as exc:
+            return "%s" % exc
 
     # -- processes, hardware, network --------------------------------------
 
@@ -2685,15 +2954,14 @@ def probe_sde_reach(env, facts, opts):
     port = opts.get("sde_port")
     probe = env.tcp(host, port, opts["timeout"]) if host else None
     return decide_tcp(
-        "DL-10", "Network",
-        "TCP reachability and latency to the enterprise geodatabase server",
+        "DL-10", "Network", "Connection to the database server",
         host, port, probe, SDE_LATENCY_WARN_MS,
-        impact="S1, S2 and S3. A slow or intermittently unreachable database "
-               "host is what turns a save into a timeout, and a timed-out save "
-               "is what strands a version state.",
-        fix="If it is slow or closed, confirm the network state and the name "
-            "resolution for this host, and re-test from a wired connection "
-            "before blaming the client.",
+        impact="A slow or unreliable connection to the database server turns "
+               "a save into a timeout, and a save that times out can lose "
+               "edits.",
+        fix="Check the network connection and VPN, and test again from a "
+            "wired connection. If it is still slow or closed, give these "
+            "results to the network or database team.",
         dataloss=True)
 
 
@@ -2855,12 +3123,14 @@ def probe_portal(env, facts, opts):
     host = opts.get("portal")
     probe = env.tcp(host, 443, opts["timeout"]) if host else None
     return decide_tcp(
-        "PF-19", "Network", "TCP reachability and latency to the portal",
+        "PF-19", "Network", "Connection to the portal",
         host, 443, probe, PORTAL_LATENCY_WARN_MS,
-        impact="S1. A slow portal lengthens sign-in and every layer the "
-               "project resolves through it at open.",
-        fix="If it is slow or closed, confirm the network state and the name "
-            "resolution for this host before changing any client setting.")
+        impact="A slow portal makes sign-in slower, and every portal layer "
+               "in the project takes longer to load when it opens.",
+        fix="Check the network connection and VPN. If it is still slow or "
+            "closed, give these results to the network team before changing "
+            "any Pro setting.",
+        flag="--portal")
 
 
 def probe_roaming(env, facts):
@@ -3014,62 +3284,62 @@ def registrations(env, facts, opts):
     than disk churn.
     """
     return [
-        ("DL-00", "Session", "Diagnostic is running as the editor", True,
+        ("DL-00", "Session", "Account being checked", True,
          lambda: probe_session(env, facts)),
-        ("DL-05", "Storage", "Project storage location", True,
+        ("DL-05", "Storage", "Where projects are stored", True,
          lambda: probe_storage(env, facts)),
-        ("DL-03", "ArcGISPro", "Project backup interval", True,
+        ("DL-03", "ArcGISPro", "Project backup setting", True,
          lambda: probe_backup(env, facts)),
-        ("DL-04", "Network", "Network adapter power management", True,
+        ("DL-04", "Network", "Network adapter power saving", True,
          lambda: probe_nic(env, facts)),
-        ("DL-06", "Storage", "OneDrive Known Folder Move", True,
+        ("DL-06", "Storage", "Documents folder synced by OneDrive", True,
          lambda: probe_kfm(env, facts)),
-        ("DL-07", "Storage", "Cloud placeholders", True,
+        ("DL-07", "Storage", "Online-only OneDrive files in project folders", True,
          lambda: probe_placeholders(env, facts)),
-        ("DL-08", "Network", "Offline Files", True,
+        ("DL-08", "Network", "Windows Offline Files", True,
          lambda: probe_offline_files(env, facts)),
-        ("DL-09", "ArcGISPro", "Crash dumps", True,
+        ("DL-09", "ArcGISPro", "ArcGIS Pro crash files", True,
          lambda: probe_crash(env, facts)),
-        ("DL-10", "Network", "SDE server reachability", True,
+        ("DL-10", "Network", "Connection to the database server", True,
          lambda: probe_sde_reach(env, facts, opts)),
-        ("DL-11", "Geodatabase", "SDE connection files", True,
+        ("DL-11", "Geodatabase", "Database connection files (.sde)", True,
          lambda: probe_sde_files(env, facts)),
-        ("DL-12", "ArcGISPro", "Pro running during the diagnostic", True,
+        ("DL-12", "ArcGISPro", "ArcGIS Pro open during the check", True,
          lambda: probe_pro_running(env, facts)),
-        ("DL-13", "System", "Event timeline", True,
+        ("DL-13", "System", "Crashes and freezes in the Windows event log", True,
          lambda: probe_events(env, facts)),
-        ("PF-07", "Cache", "Leftover session folders", True,
+        ("PF-07", "Cache", "Leftover ArcGIS Pro session folders", True,
          lambda: probe_protemp(env, facts)),
 
-        ("PF-02", "Network", "SMB client configuration", False,
+        ("PF-02", "Network", "Network file-share (SMB) settings", False,
          lambda: probe_smb(env, facts)),
-        ("PF-03", "Network", "Directory listing time on the project share",
+        ("PF-03", "Network", "Network share speed",
          False, lambda: probe_share_latency(env, facts)),
-        ("PF-04", "ArcGISPro", "Pro version and patch level", False,
+        ("PF-04", "ArcGISPro", "ArcGIS Pro version", False,
          lambda: probe_pro_version(env, facts)),
-        ("PF-05", "Display", "Rendering and display settings", False,
+        ("PF-05", "Display", "Pro display settings", False,
          lambda: probe_rendering(env, facts)),
-        ("PF-06", "Cache", "ESRI local caches", False,
+        ("PF-06", "Cache", "Pro local cache", False,
          lambda: probe_caches(env, facts)),
-        ("PF-08", "ArcGISPro", "Search index state", False,
+        ("PF-08", "ArcGISPro", "Pro search index", False,
          lambda: probe_index(env, facts)),
-        ("PF-11", "Hardware", "Per-app GPU preference", False,
+        ("PF-11", "Hardware", "Graphics card used by Pro", False,
          lambda: probe_gpu_preference(env, facts)),
-        ("PF-12", "Hardware", "Physical memory", False,
+        ("PF-12", "Hardware", "Memory (RAM)", False,
          lambda: probe_memory(env, facts)),
         ("PF-13", "Hardware", "Free disk space", False,
          lambda: probe_disk(env, facts)),
-        ("PF-15", "System", "Active power plan", False,
+        ("PF-15", "System", "Power plan", False,
          lambda: probe_power_plan(env, facts)),
-        ("PF-17", "Security", "Microsoft Defender exclusions", False,
+        ("PF-17", "Security", "Antivirus exclusions (Microsoft Defender)", False,
          lambda: probe_defender(env, facts)),
-        ("PF-19", "Network", "Portal reachability", False,
+        ("PF-19", "Network", "Connection to the portal", False,
          lambda: probe_portal(env, facts, opts)),
-        ("PF-22", "ArcGISPro", "Layer refresh timers from the .aprx", False,
+        ("PF-22", "ArcGISPro", "Layer refresh timers and default geodatabase", False,
          lambda: probe_aprx(env, facts)),
         ("PF-26", "System", "Roaming profile", False,
          lambda: probe_roaming(env, facts)),
-        ("PF-27", "Display", "Symbology refresh (S4)", False,
+        ("PF-27", "Display", "Map not redrawing after a field calculation", False,
          lambda: probe_symbology(env, facts)),
     ]
 
@@ -3117,13 +3387,14 @@ def run_checks(env, opts):
         if enabled.get(cid, True) is False:
             add_check(checks, cid=cid, category=category, title=title,
                       status="Skipped", dataloss=dataloss, measured=False,
+                      result="Not checked: turned off in CHECKS_ENABLED.",
                       observed="Turned off in CHECKS_ENABLED, so it was not "
                                "measured this run.",
                       expected="The check runs.",
-                      impact="Unknown. This cause was neither ruled in nor "
-                             "out, and no fix will run off this record.",
-                      fix="Set %s to True in CHECKS_ENABLED and re-run."
-                          % cid)
+                      impact="This possible cause is neither confirmed nor "
+                             "ruled out, and no automatic fix will act on it.",
+                      fix="To include it, set %s to True in CHECKS_ENABLED "
+                          "at the top of prostall.py and run again." % cid)
             continue
 
         def body(target, probe=probe):
@@ -3159,7 +3430,7 @@ def apply_gate(checks, target, per_user):
         session = by_id(checks, "DL-00")
         if session is not None and session["status"] == "Fail":
             return False, ("a per-user fix would write into this profile, not "
-                           "the editor's. Re-run it in her session")
+                           "the editor's. Re-run it in the editor's session")
     return True, ""
 
 
@@ -3270,80 +3541,212 @@ def run(env, opts):
 # REPORTING
 # =============================================================================
 
+WIDTH = 79
+
+# What each status is called in the console report. The JSON keeps the five
+# status names; these are only how a person reads them.
+STATUS_LABELS = {
+    "Fail": "PROBLEM",
+    "Warn": "WARNING",
+    "Pass": "OK",
+    "Info": "INFO",
+    "Skipped": "NOT CHECKED",
+}
+LABEL_WIDTH = 13
+
+
+def _wrap(text, first, rest=None):
+    """Wrapped lines of one paragraph, or nothing for empty text."""
+    if not (text or "").strip():
+        return []
+    return textwrap.wrap(text, WIDTH, initial_indent=first,
+                         subsequent_indent=first if rest is None else rest,
+                         break_long_words=False, break_on_hyphens=False)
+
+
+def _heading(text):
+    return "== %s %s" % (text, "=" * (WIDTH - len(text) - 4))
+
+
+def undetermined(check):
+    """Skipped, or Info on a check that says it did not measure."""
+    return (check["status"] == "Skipped"
+            or (check["status"] == "Info" and not check.get("measured", True)))
+
+
+def next_steps(document):
+    """The numbered to-do list: [(number, check)], data loss first.
+
+    A step is a Fail or Warn that carries fix text. Numbering runs on across
+    both groups, so the body of the report can point at a step by number.
+    """
+    found = [c for c in document["checks"]
+             if c["status"] in ("Fail", "Warn") and c["fix"]]
+    ordered = ([c for c in found if c["dataloss"]]
+               + [c for c in found if not c["dataloss"]])
+    return [(n + 1, c) for n, c in enumerate(ordered)]
+
+
+def _fix_notes(document):
+    """(fix id, plain sentence) for each fix that was held back or failed."""
+    out = []
+    titles = dict([(f[0], (f[4].__doc__ or "").strip().splitlines()[0])
+                   for f in FIXES])
+    for note in document["notes"]:
+        match = re.match(r"(\w+(?: \w+)?) \[([\w-]+)\] ?(.*)$", note)
+        if not match:
+            continue
+        kind, fid, rest = match.groups()
+        what = titles.get(fid, fid).rstrip(".")
+        if kind == "refused":
+            bid = rest.split(":")[0]
+            blocker = by_id(document["checks"], bid)
+            out.append((fid, "%s: not done. Held back by \"%s\" [%s]."
+                        % (what, blocker["title"] if blocker else bid, bid)))
+        elif kind == "failed":
+            out.append((fid, "%s: tried and failed (%s)." % (what, rest)))
+        elif kind == "off":
+            out.append((fid, "%s: turned off in FIXES_ENABLED." % what))
+    return out
+
+
 def render(document, verbose=False):
     """The console and text report, as a list of lines."""
-    lines = ["prostall %d  -  ArcGIS Pro workstation diagnostic" % REPORT_VERSION,
-             "taken %s UTC as %s (elevated: %s)"
-             % (document["taken"], document["user"], document["elevated"]),
+    steps = next_steps(document)
+    step_of = dict([(c["id"], n) for n, c in steps])
+    tally = dict(counts(document["checks"]))
+    lines = ["prostall: ArcGIS Pro workstation check",
+             "Run on %s UTC as %s (%s)"
+             % (document["taken"], document["user"],
+                "as administrator" if document["elevated"]
+                else "not as administrator"),
              ""]
-    lines.append("Symptom key used in the impact lines:")
-    for code, text in SYMPTOMS:
-        lines.append("  %s  %s" % (code, text))
-    for heading, wanted in (("DATA LOSS", True), ("PERFORMANCE", False)):
+    lines.extend(_wrap(
+        "Overall: %d problem(s), %d warning(s), %d OK, %d for information, "
+        "%d not checked." % (tally["Fail"], tally["Warn"], tally["Pass"],
+                             tally["Info"], tally["Skipped"]), ""))
+    for heading, wanted in (("RISKS TO SAVED EDITS", True),
+                            ("PERFORMANCE", False)):
         lines.append("")
-        lines.append("--- %s %s" % (heading, "-" * (62 - len(heading))))
+        lines.append(_heading(heading))
         for check in document["checks"]:
             if bool(check["dataloss"]) is not wanted:
                 continue
-            lines.extend(render_check(check, verbose))
+            lines.append("")
+            lines.extend(render_check(check, verbose,
+                                      step=step_of.get(check["id"])))
+
     lines.append("")
-    lines.append("--- SUMMARY " + "-" * 62)
-    lines.append("  " + "   ".join(["%s %d" % (name.upper(), n)
-                                    for name, n in counts(document["checks"])]))
+    lines.append(_heading("WHAT TO DO NEXT"))
+    first = [(n, c) for n, c in steps if c["dataloss"]]
+    then = [(n, c) for n, c in steps if not c["dataloss"]]
+    if not steps:
+        lines.append("")
+        if exit_code(document["checks"]) == 3:
+            lines.extend(_wrap("Almost nothing could be checked on this "
+                               "machine, so this report cannot say whether "
+                               "anything needs fixing. See the list below.",
+                               ""))
+        else:
+            lines.append("Nothing needs fixing based on what could be checked.")
+    for intro, group in (("Start with these. They can cause lost edits:",
+                          first),
+                         ("Then these, which affect speed:", then)):
+        if not group:
+            continue
+        lines.append("")
+        lines.append(intro)
+        for n, check in group:
+            lines.append("")
+            lines.extend(_wrap("%2d. %s [%s]" % (n, check["title"],
+                                                 check["id"]),
+                               "  ", "      "))
+            lines.extend(_wrap(check["fix"], "      "))
+
     if document["fixable"]:
-        lines.append("  %d finding(s) have a fix here. Re-run with --apply:"
-                     % len(document["fixable"]))
+        lines.append("")
+        lines.extend(_wrap("prostall can make %d of these changes for you. "
+                           "Close ArcGIS Pro, then run prostall again with "
+                           "--apply:" % len(document["fixable"]), ""))
         for cid in document["fixable"]:
             check = by_id(document["checks"], cid)
-            lines.append("     %s  %s" % (cid, check["title"]))
-    if document["act_first"]:
+            lines.extend(_wrap("- %s [%s]" % (check["title"], cid),
+                               "  ", "    "))
+    held = _fix_notes(document)
+    if held:
         lines.append("")
-        lines.append("  ACT ON THESE FIRST (they bear on the vanished edits):")
-        for cid in document["act_first"]:
-            check = by_id(document["checks"], cid)
-            lines.append("     %s  %s" % (cid, check["title"]))
-    if document["notes"]:
+        lines.append("Automatic fixes not done this time:")
+        for fid, text in held:
+            lines.extend(_wrap("- [%s] %s" % (fid, text), "  ", "    "))
+    if document["applied"]:
         lines.append("")
-        lines.append("--- FIXES " + "-" * 64)
+        lines.append("Changed by --apply:")
+        for record in document["applied"]:
+            lines.extend(_wrap("- [%s] %s" % (record["id"], record["what"]),
+                               "  ", "    "))
+            lines.append("    Result:  %s" % record["result"])
+            lines.append("    To undo: %s" % record["undo"])
+
+    unsure = [c for c in document["checks"] if undetermined(c) and c["fix"]]
+    if unsure:
+        lines.append("")
+        lines.extend(_wrap("These could not be checked. Look at them by hand "
+                           "if they might matter:", ""))
+        for check in unsure:
+            lines.append("")
+            lines.extend(_wrap("- %s [%s]" % (check["title"], check["id"]),
+                               "  ", "    "))
+            lines.extend(_wrap(check["fix"], "    "))
+    if verbose and document["notes"]:
+        lines.append("")
+        lines.append("Fix log:")
         for note in document["notes"]:
-            lines.append("  " + note)
-    for record in document["applied"]:
-        lines.append("  APPLIED [%s] %s" % (record["id"], record["what"]))
-        lines.append("           result : %s" % record["result"])
-        lines.append("           undo   : %s" % record["undo"])
+            lines.extend(_wrap(note, "  ", "    "))
     return lines
 
 
-def render_check(check, verbose=False):
-    """One check, as the report prints it."""
-    lines = ["%s [%-7s] %-6s %s"
-             % ("DATA" if check["dataloss"] else "    ",
-                check["status"].upper(), check["id"], check["title"])]
-    for line in check["observed"].split("\n"):
-        if line.strip():
-            lines.append("          " + line)
-    if check["status"] in ("Warn", "Fail") or verbose:
-        if check["impact"]:
-            lines.append("          impact : %s" % check["impact"])
-        if check["fix"]:
-            lines.append("          fix    : %s" % check["fix"])
+def render_check(check, verbose=False, step=None):
+    """One check, as the report prints it.
+
+    OK, INFO and NOT CHECKED print their one-line result; the evidence behind
+    them is in --verbose. A PROBLEM or WARNING also prints why it matters and
+    what was found, and points at its step in the to-do list.
+    """
+    pad = " " * LABEL_WIDTH
+    lines = ["%-*s%s  [%s]" % (LABEL_WIDTH, STATUS_LABELS[check["status"]],
+                               check["title"], check["id"])]
+    lines.extend(_wrap(check["result"], pad))
+    flagged = check["status"] in ("Warn", "Fail")
+    if flagged or verbose:
+        lines.extend(_wrap("Why it matters: %s" % check["impact"], pad)
+                     if check["impact"] else [])
+    if flagged and step is not None:
+        lines.append("%sWhat to do: see step %d below." % (pad, step))
+    if verbose and check["fix"] and step is None:
+        lines.extend(_wrap("What to do: %s" % check["fix"], pad))
+    if verbose and check["expected"]:
+        lines.extend(_wrap("Expected: %s" % check["expected"], pad))
+    if flagged or verbose:
+        found = [l for l in check["observed"].split("\n") if l.strip()]
+        if found:
+            lines.append("%sFound:" % pad)
+            lines.extend(["%s  %s" % (pad, l) for l in found])
     if verbose:
-        if check["expected"]:
-            lines.append("          expect : %s" % check["expected"])
         for line in check["detail"].split("\n"):
             if line.strip():
-                lines.append("          | " + line)
+                lines.append("%s| %s" % (pad, line))
     return lines
 
 
 def write_report(document, directory, verbose=False):
-    """Write the text and JSON reports. Returns the two paths."""
+    """Write the text, JSON and HTML reports. Returns the three paths."""
     if not os.path.isdir(directory):
         os.makedirs(directory)
     base = "prostall_%s" % time.strftime("%Y%m%d_%H%M%S",
                                          time.gmtime(time.time()))
     text_path = os.path.join(directory, base + ".txt")
     json_path = os.path.join(directory, base + ".json")
+    html_path = os.path.join(directory, base + ".html")
     handle = open(text_path, "wb")
     try:
         handle.write(("\n".join(render(document, verbose)) + "\n")
@@ -3356,7 +3759,702 @@ def write_report(document, directory, verbose=False):
                      .encode("utf-8"))
     finally:
         handle.close()
-    return text_path, json_path
+    write_html(document, html_path)
+    return text_path, json_path, html_path
+
+
+# -- The HTML report ----------------------------------------------------------
+# One self-contained file: no web font, no script or stylesheet fetched from
+# anywhere, so it opens the same on a locked-down workstation as on the desk of
+# whoever it is mailed to. The colours and type follow the NYCEM brand guide:
+# NYCEM Blue for the header, Electric Blue for headings and links, Sky Blue for
+# accents, and the program colours for the status badges. Owners is an Adobe
+# font a workstation will rarely have, so titles fall back to Aptos Black, the
+# guide's own Microsoft substitute.
+
+HTML_STATUS_CLASS = {
+    "Fail": "fail",
+    "Warn": "warn",
+    "Pass": "ok",
+    "Info": "info",
+    "Skipped": "skip",
+}
+
+# A Windows path: a drive or a UNC share, then anything up to the first thing
+# that ends a path in this tool's evidence lines. Paths hold single spaces
+# ("Local Caches", "OneDrive - Example"), so a single space cannot end one; a
+# double space, a column separator or a following word or number does.
+_PATH_START = re.compile(r"(?:\b[A-Za-z]:\\|\\\\[\w.$-]+\\)")
+_PATH_STOP = re.compile(r"\s{2}|\s[(=<\[]|\s->|[;,]\s|\s\d|\.\s|\.$|\s+$"
+                        r"|\s(?:under|and|is|was|which|so|on|in|for|to|from|"
+                        r"with|but|not)\s")
+_FILE_EXT = re.compile(r"\.(aprx|dmp|sde|config|exe|xml|json|txt|log|zip)$",
+                       re.IGNORECASE)
+
+
+def find_paths(text):
+    """The Windows paths in a block of evidence text, in order, once each."""
+    found = []
+    for line in (text or "").split("\n"):
+        for start in _PATH_START.finditer(line):
+            rest = line[start.start():]
+            rest = rest.split('"')[0].split("<")[0]
+            stop = _PATH_STOP.search(rest, 3)
+            path = (rest[:stop.start()] if stop else rest).rstrip(".,;:)")
+            if len(path) > 3 and path not in found:
+                found.append(path)
+    return found
+
+
+def folder_of(path):
+    """The folder to open for a path: a file's parent, or the path itself."""
+    return ntpath.dirname(path) if _FILE_EXT.search(path) else path
+
+
+def check_paths(check):
+    """The paths a person may want to open for this check."""
+    paths = find_paths("\n".join([check["observed"], check["detail"]]))
+    if check["id"] == "PF-07":
+        # The session folders are listed by name under one root. The ones
+        # worth opening are those the check says may hold unsaved work.
+        root = (paths or [""])[0]
+        names = re.findall(r"ArcGISProTemp\w+", check["detail"])
+        if root and names:
+            paths = [ntpath.join(root, name) for name in names] + paths
+    if len(paths) > 5:
+        # A long list of files (a dozen .sde files) reads better as the few
+        # folders that hold them.
+        folders = []
+        for path in paths:
+            if folder_of(path) not in folders:
+                folders.append(folder_of(path))
+        paths = folders
+    return paths
+
+
+def _ps_quote(text):
+    return "'%s'" % text.replace("'", "''")
+
+
+_PRO_CLOSED = ("    if (Get-Process ArcGISPro -ErrorAction SilentlyContinue) {\n"
+               "        Write-Warning 'Close ArcGIS Pro first, then run this "
+               "again.'; return\n"
+               "    }\n")
+
+
+def cleanup_scripts(check):
+    """[(title, what it does, PowerShell)] that help with this check's step.
+
+    These are offered, not run: the person copies one into PowerShell. Each is
+    wrapped in & { } so a pasted script stops as a whole when a guard says
+    stop, rather than one line at a time. Nothing here deletes a file
+    outright. The one that removes folders sends them to the Recycle Bin, and
+    only after a preview run that changes nothing.
+    """
+    cid = check["id"]
+    paths = check_paths(check)
+    out = []
+    if cid == "PF-07":
+        keep = re.findall(r"ArcGISProTemp\w+", check["detail"])
+        out.append((
+            "List the session folders",
+            "Read-only. Shows each leftover session folder with its size and "
+            "how many project files it holds, newest first.",
+            "& {\n"
+            "    Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter "
+            "'ArcGISProTemp*' |\n"
+            "        Sort-Object LastWriteTime -Descending |\n"
+            "        ForEach-Object {\n"
+            "            $files = Get-ChildItem -LiteralPath $_.FullName "
+            "-Recurse -File -ErrorAction SilentlyContinue\n"
+            "            [pscustomobject]@{\n"
+            "                Folder   = $_.FullName\n"
+            "                Modified = $_.LastWriteTime\n"
+            "                SizeMB   = [math]::Round(($files | Measure-Object "
+            "Length -Sum).Sum / 1MB, 1)\n"
+            "                Projects = @($files | Where-Object Extension -eq "
+            "'.aprx').Count\n"
+            "            }\n"
+            "        } | Format-Table -AutoSize\n"
+            "}"))
+        out.append((
+            "Recycle old session folders",
+            "Sends session folders older than 7 days to the Recycle Bin. It "
+            "keeps any folder that holds a project file, and the ones this "
+            "report says may hold unsaved work. The first run only lists what "
+            "it would do; change $Preview to $false to act.",
+            "& {\n"
+            "    $Preview = $true    # change to $false to recycle the folders\n"
+            "    $Days    = 7\n"
+            "    $Keep    = @(%s)\n"
+            "%s"
+            "    Add-Type -AssemblyName Microsoft.VisualBasic\n"
+            "    $cutoff = (Get-Date).AddDays(-$Days)\n"
+            "    Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter "
+            "'ArcGISProTemp*' |\n"
+            "        Where-Object { $_.LastWriteTime -lt $cutoff } |\n"
+            "        ForEach-Object {\n"
+            "            $held = Get-ChildItem -LiteralPath $_.FullName -Recurse "
+            "-File -Filter '*.aprx' -ErrorAction SilentlyContinue\n"
+            "            if ($held -or $Keep -contains $_.Name) {\n"
+            "                Write-Host \"Kept, may hold unsaved work: "
+            "$($_.FullName)\"; return\n"
+            "            }\n"
+            "            if ($Preview) { Write-Host \"Would recycle: "
+            "$($_.FullName)\"; return }\n"
+            "            [Microsoft.VisualBasic.FileIO.FileSystem]::"
+            "DeleteDirectory($_.FullName, 'OnlyErrorDialogs', "
+            "'SendToRecycleBin')\n"
+            "            Write-Host \"Recycled: $($_.FullName)\"\n"
+            "        }\n"
+            "}" % (", ".join([_ps_quote(k) for k in keep]), _PRO_CLOSED)))
+    elif cid == "PF-06" and paths:
+        out.append((
+            "Move the cache aside",
+            "Does what --apply does: renames the cache folder so Pro builds a "
+            "fresh one. Nothing is deleted, and it prints the command to undo. "
+            "Once Pro has worked well for a week, the renamed folder can go.",
+            "& {\n"
+            "    $Cache = %s\n"
+            "%s"
+            "    if (-not (Test-Path -LiteralPath $Cache)) {\n"
+            "        Write-Warning \"There is no cache folder at $Cache.\"; "
+            "return\n"
+            "    }\n"
+            "    $name = '{0}.aside-{1:yyyyMMddHHmmss}' -f (Split-Path $Cache "
+            "-Leaf), (Get-Date)\n"
+            "    Rename-Item -LiteralPath $Cache -NewName $name\n"
+            "    Write-Host \"Renamed to $name. Pro builds a new cache when it "
+            "next starts.\"\n"
+            "    Write-Host \"To undo, close Pro and run: Rename-Item "
+            "-LiteralPath '$(Join-Path (Split-Path $Cache) $name)' -NewName "
+            "'$(Split-Path $Cache -Leaf)'\"\n"
+            "}" % (_ps_quote(paths[0]), _PRO_CLOSED)))
+    elif cid == "DL-09":
+        out.append((
+            "Collect the crash files for a support case",
+            "Copies Pro's crash files into one zip on the Desktop, ready to "
+            "attach to an Esri support case. The originals are not touched.",
+            "& {\n"
+            "    $zip = Join-Path ([Environment]::GetFolderPath('Desktop')) "
+            "('ArcGISPro-crash-files-{0:yyyyMMdd}.zip' -f (Get-Date))\n"
+            "    $dumps = @(Get-ChildItem -LiteralPath (Join-Path "
+            "$env:LOCALAPPDATA 'ESRI\\ErrorReports') -Recurse -File -Filter "
+            "'*.dmp' -ErrorAction SilentlyContinue) +\n"
+            "             @(Get-ChildItem -LiteralPath (Join-Path "
+            "$env:LOCALAPPDATA 'CrashDumps') -File -Filter '*ArcGIS*.dmp' "
+            "-ErrorAction SilentlyContinue)\n"
+            "    if (-not $dumps) { Write-Host 'No crash files found.'; "
+            "return }\n"
+            "    Compress-Archive -LiteralPath $dumps.FullName "
+            "-DestinationPath $zip -Force\n"
+            "    Write-Host \"Copied $($dumps.Count) crash file(s) into "
+            "$zip\"\n"
+            "}"))
+    elif cid == "DL-13":
+        out.append((
+            "Save these events to a spreadsheet",
+            "Read-only. Saves the Pro crash and freeze events and unexpected "
+            "shutdowns from the last %d days to a CSV file on the Desktop, "
+            "for a support case." % EVENT_WINDOW_DAYS,
+            "& {\n"
+            "    $since = (Get-Date).AddDays(-%d)\n"
+            "    $csv = Join-Path ([Environment]::GetFolderPath('Desktop')) "
+            "('ArcGISPro-events-{0:yyyyMMdd}.csv' -f (Get-Date))\n"
+            "    $app = Get-WinEvent -FilterHashtable @{LogName='Application'; "
+            "Id=1000,1002; StartTime=$since} -ErrorAction SilentlyContinue |\n"
+            "        Where-Object { $_.Message -match 'ArcGISPro' }\n"
+            "    $sys = Get-WinEvent -FilterHashtable @{LogName='System'; "
+            "Id=41,6008; StartTime=$since} -ErrorAction SilentlyContinue\n"
+            "    @($app) + @($sys) | Sort-Object TimeCreated -Descending |\n"
+            "        Select-Object TimeCreated, LogName, Id, ProviderName,\n"
+            "            @{n='Message'; e={ ($_.Message -split \"`r?`n\")[0] }} "
+            "|\n"
+            "        Export-Csv -LiteralPath $csv -NoTypeInformation\n"
+            "    Write-Host \"Saved to $csv\"\n"
+            "}" % EVENT_WINDOW_DAYS))
+    elif cid == "DL-07" and len(paths) > 0:
+        folder = ntpath.dirname(paths[0]) or paths[0]
+        out.append((
+            "Keep the project folder on this computer",
+            "Tells OneDrive to download everything in the folder and keep it "
+            "here, the same as right-clicking it and choosing \"Always keep "
+            "on this device\". A stopgap until the projects move out of "
+            "OneDrive.",
+            "& {\n"
+            "    $Folder = %s\n"
+            "    attrib +P -U \"$Folder\"\n"
+            "    attrib +P -U \"$Folder\\*\" /S /D\n"
+            "    Write-Host \"OneDrive will download and keep everything under "
+            "$Folder.\"\n"
+            "}" % _ps_quote(folder)))
+    elif cid == "PF-15":
+        out.append((
+            "Switch to the High performance power plan",
+            "Changes the active power plan and prints the command to switch "
+            "back. If your organisation hides the plan, it says so and "
+            "changes nothing.",
+            "& {\n"
+            "    $before = (powercfg /getactivescheme) -replace "
+            "'.*GUID:\\s*([0-9a-fA-F-]+).*', '$1'\n"
+            "    powercfg /setactive %s\n"
+            "    if ($LASTEXITCODE -ne 0) {\n"
+            "        Write-Warning 'The High performance plan is not "
+            "available here. Ask IT.'; return\n"
+            "    }\n"
+            "    powercfg /getactivescheme\n"
+            "    Write-Host \"To undo: powercfg /setactive $before\"\n"
+            "}" % HIGH_PERFORMANCE_PLAN))
+    elif cid == "PF-13":
+        out.append((
+            "Find the biggest folders in your profile",
+            "Read-only. Lists the 15 largest folders under your user profile. "
+            "It can take a few minutes on a full disk.",
+            "& {\n"
+            "    Get-ChildItem -LiteralPath $env:USERPROFILE -Directory -Force "
+            "-ErrorAction SilentlyContinue |\n"
+            "        ForEach-Object {\n"
+            "            $bytes = (Get-ChildItem -LiteralPath $_.FullName "
+            "-Recurse -File -Force -ErrorAction SilentlyContinue |\n"
+            "                      Measure-Object Length -Sum).Sum\n"
+            "            [pscustomobject]@{ Folder = $_.FullName; SizeGB = "
+            "[math]::Round($bytes / 1GB, 2) }\n"
+            "        } | Sort-Object SizeGB -Descending | Select-Object "
+            "-First 15 | Format-Table -AutoSize\n"
+            "}"))
+        out.append((
+            "Open Storage Sense",
+            "Opens the Windows settings page that clears temporary files and "
+            "the Recycle Bin.",
+            "Start-Process ms-settings:storagesense"))
+    elif cid == "PF-11":
+        out.append((
+            "Open Windows graphics settings",
+            "Opens the page where ArcGIS Pro can be set to High performance "
+            "by hand, if you would rather not use --apply.",
+            "Start-Process ms-settings:display-advancedgraphics"))
+    return out
+
+
+_HTML_CSS = """
+:root {
+  --nycem-blue: #222b4e; --electric-blue: #2b358e; --sky-blue: #b5cbe7;
+  --hazard-orange: #f44e1c; --notify-red: #d70010; --ready-yellow: #f4e203;
+  --cert-green: #59ad46; --ink: #1b2140; --muted: #4a5170; --line: #d5dbe8;
+  --paper: #ffffff; --wash: #f2f5fa;
+  --title-font: "Owners", "Aptos Black", "Aptos", "Segoe UI Black",
+                "Arial Black", sans-serif;
+  --body-font: "Aptos", "Segoe UI", Calibri, Arial, sans-serif;
+  --code-font: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+* { box-sizing: border-box; }
+html { background: var(--wash); }
+body { margin: 0; color: var(--ink); background: var(--wash);
+       font: 16px/1.5 var(--body-font); }
+a { color: var(--electric-blue); }
+header { position: relative; background: var(--nycem-blue); color: #fff;
+         padding: 28px 16px 26px; overflow: hidden; }
+header::after { content: ""; position: absolute; top: 0; right: 32px;
+                width: 26px; height: 58px; background: var(--sky-blue); }
+.wrap { max-width: 980px; margin: 0 auto; }
+.org { margin: 0 0 6px; font: 700 13px/1.3 var(--body-font);
+       letter-spacing: .06em; text-transform: uppercase; color: var(--sky-blue); }
+h1, h2, h3 { font-family: var(--title-font); font-weight: 900; margin: 0; }
+h1 { font-size: 32px; line-height: 1.15; }
+.run { margin: 8px 0 0; color: #dfe6f3; font-size: 15px; }
+main { padding: 0 16px 48px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+         gap: 12px; margin: 24px 0 12px; }
+.tile { background: var(--paper); border: 1px solid var(--line);
+        border-top: 6px solid var(--muted); padding: 12px 14px; }
+.tile b { display: block; font: 900 30px/1 var(--title-font); }
+.tile span { color: var(--muted); font-size: 14px; }
+.tile.fail { border-top-color: var(--notify-red); }
+.tile.warn { border-top-color: var(--hazard-orange); }
+.tile.ok { border-top-color: var(--cert-green); }
+.tile.info { border-top-color: var(--sky-blue); }
+.verdict { background: var(--paper); border-left: 6px solid var(--electric-blue);
+           padding: 14px 16px; margin: 0 0 8px; font-size: 17px; }
+.verdict a { font-weight: 700; }
+section { margin-top: 36px; }
+section > h2 { color: var(--nycem-blue); font-size: 26px;
+               padding-bottom: 6px; border-bottom: 3px solid var(--sky-blue);
+               margin-bottom: 14px; }
+.lede { color: var(--muted); margin: -6px 0 14px; font-style: italic; }
+.card { background: var(--paper); border: 1px solid var(--line);
+        border-left: 6px solid var(--line); padding: 14px 16px; margin: 0 0 10px; }
+.card.fail { border-left-color: var(--notify-red); }
+.card.warn { border-left-color: var(--hazard-orange); }
+.card.ok { border-left-color: var(--cert-green); }
+.card.info { border-left-color: var(--sky-blue); }
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.card h3 { font: 700 18px/1.3 var(--body-font); color: var(--nycem-blue); }
+.cid { color: var(--muted); font: 13px var(--code-font); }
+.badge { display: inline-block; min-width: 96px; text-align: center;
+         padding: 2px 8px; font: 800 12px/1.6 var(--body-font);
+         letter-spacing: .05em; border-radius: 3px; }
+.badge.fail { background: var(--notify-red); color: #fff; }
+.badge.warn { background: var(--ready-yellow); color: var(--nycem-blue); }
+.badge.ok { background: var(--cert-green); color: var(--nycem-blue); }
+.badge.info { background: var(--sky-blue); color: var(--nycem-blue); }
+.badge.skip { background: #e3e6ee; color: var(--nycem-blue); }
+.result { margin: 6px 0 0; }
+.why { margin: 8px 0 0; }
+.why b, .todo b { color: var(--nycem-blue); }
+.todo { margin: 8px 0 0; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--electric-blue); font-weight: 700;
+          font-size: 14px; }
+pre { margin: 8px 0 0; padding: 10px 12px; background: var(--wash);
+      border: 1px solid var(--line); font: 13px/1.45 var(--code-font);
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+.kv { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: none; }
+.step { background: var(--paper); border: 1px solid var(--line);
+        padding: 16px; margin: 0 0 12px; display: grid;
+        grid-template-columns: 44px 1fr; gap: 0 12px; }
+.step .num { width: 40px; height: 40px; display: grid; place-items: center;
+             background: var(--nycem-blue); color: #fff;
+             font: 900 20px/1 var(--title-font); }
+.step.dataloss .num { background: var(--notify-red); }
+.step h3 { font: 700 18px/1.3 var(--body-font); color: var(--nycem-blue);
+           margin-top: 8px; }
+.step-body { min-width: 0; }
+.group-intro { font: 700 17px/1.4 var(--body-font); color: var(--nycem-blue);
+               margin: 18px 0 10px; }
+.paths { margin: 10px 0 0; padding: 0; list-style: none; }
+.paths li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+            margin: 0 0 6px; }
+.path { font: 13px/1.4 var(--code-font); background: #eaf0f9;
+        border: 1px solid var(--sky-blue); padding: 3px 8px;
+        overflow-wrap: anywhere; min-width: 0; }
+button.copy, a.open { font: 700 12px/1 var(--body-font); padding: 6px 10px;
+        border: 1px solid var(--electric-blue); background: #fff;
+        color: var(--electric-blue); cursor: pointer; text-decoration: none;
+        border-radius: 3px; }
+button.copy:hover, a.open:hover { background: var(--electric-blue); color: #fff; }
+button.copy.done { background: var(--cert-green); border-color: var(--cert-green);
+                   color: var(--nycem-blue); }
+.script { margin: 12px 0 0; border: 1px solid var(--line); }
+.script-head { display: flex; flex-wrap: wrap; justify-content: space-between;
+               align-items: center; gap: 8px; background: var(--nycem-blue);
+               color: #fff; padding: 8px 12px; }
+.script-head b { font-size: 15px; }
+.script-head button.copy { border-color: #fff; }
+.script p { margin: 8px 12px 0; font-size: 14px; color: var(--muted); }
+.script pre { margin: 8px 12px 12px; background: #0f1530; color: #e8edf8;
+              border: 0; overflow-x: auto; white-space: pre; }
+.sub { font: 700 15px/1.4 var(--body-font); color: var(--nycem-blue);
+       margin: 14px 0 4px; }
+.box { background: var(--paper); border: 1px solid var(--line);
+       padding: 12px 16px; margin: 0 0 12px; }
+.box ul { margin: 6px 0 0; padding-left: 20px; }
+.box li { margin: 0 0 6px; }
+.tip { font-size: 14px; color: var(--muted); }
+footer { padding: 18px 16px 32px; color: var(--muted); font-size: 13px;
+         border-top: 1px solid var(--line); }
+@media (max-width: 560px) {
+  h1 { font-size: 26px; }
+  header::after { right: 16px; width: 18px; height: 40px; }
+  .step { grid-template-columns: 1fr; }
+  .step .num { margin-bottom: 6px; }
+}
+@media print {
+  html, body { background: #fff; }
+  button.copy, a.open { display: none; }
+  details { display: block; }
+  details > summary { display: none; }
+  .card, .step, .script { break-inside: avoid; }
+  .script pre { background: #fff; color: #000; border: 1px solid var(--line); }
+}
+"""
+
+_HTML_JS = """
+function copyText(text, button) {
+  function done() {
+    button.textContent = "Copied";
+    button.classList.add("done");
+    setTimeout(function () {
+      button.textContent = button.getAttribute("data-label");
+      button.classList.remove("done");
+    }, 1600);
+  }
+  function fallback() {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand("copy"); done(); } catch (e) {}
+    document.body.removeChild(area);
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } else {
+    fallback();
+  }
+}
+document.addEventListener("click", function (event) {
+  var button = event.target.closest("button.copy");
+  if (!button) { return; }
+  var source = document.getElementById(button.getAttribute("data-for"));
+  if (source) { copyText(source.textContent, button); }
+});
+"""
+
+
+def _h(text):
+    """Escape text for HTML."""
+    return (("%s" % (text if text is not None else ""))
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _file_url(path):
+    """A file:/// link for a local or UNC path."""
+    if path.startswith("\\\\"):
+        url = "file:" + path.replace("\\", "/")
+    else:
+        url = "file:///" + path.replace("\\", "/")
+    return url.replace("%", "%25").replace(" ", "%20").replace("#", "%23")
+
+
+class _Ids(object):
+    """Unique element ids, so each Copy button finds its own text."""
+
+    def __init__(self):
+        self.n = 0
+
+    def next(self):
+        self.n += 1
+        return "c%d" % self.n
+
+
+def _html_paths(paths, ids):
+    if not paths:
+        return []
+    out = ['<ul class="paths">']
+    for path in paths:
+        eid = ids.next()
+        out.append('<li><code class="path" id="%s">%s</code>'
+                   '<button class="copy" type="button" data-for="%s" '
+                   'data-label="Copy path">Copy path</button>'
+                   '<a class="open" href="%s">Open folder</a></li>'
+                   % (eid, _h(path), eid, _h(_file_url(folder_of(path)))))
+    out.append("</ul>")
+    return out
+
+
+def _html_scripts(scripts, ids):
+    out = []
+    for title, what, code in scripts:
+        eid = ids.next()
+        out.append('<div class="script"><div class="script-head">'
+                   '<b>%s</b><button class="copy" type="button" '
+                   'data-for="%s" data-label="Copy script">Copy script'
+                   '</button></div><p>%s</p><pre id="%s">%s</pre></div>'
+                   % (_h(title), eid, _h(what), eid, _h(code)))
+    return out
+
+
+def _html_check(check, step, ids):
+    css = HTML_STATUS_CLASS[check["status"]]
+    flagged = check["status"] in ("Warn", "Fail")
+    out = ['<article class="card %s" id="%s">' % (css, _h(check["id"])),
+           '<div class="card-head"><span class="badge %s">%s</span>'
+           '<h3>%s</h3><span class="cid">%s</span></div>'
+           % (css, STATUS_LABELS[check["status"]], _h(check["title"]),
+              _h(check["id"]))]
+    if check["result"]:
+        out.append('<p class="result">%s</p>' % _h(check["result"]))
+    if flagged and check["impact"]:
+        out.append('<p class="why"><b>Why it matters:</b> %s</p>'
+                   % _h(check["impact"]))
+    if flagged and step is not None:
+        out.append('<p class="todo"><b>What to do:</b> '
+                   '<a href="#step-%d">see step %d</a>.</p>' % (step, step))
+    found = [l for l in check["observed"].split("\n") if l.strip()]
+    extra = []
+    if check["impact"] and not flagged:
+        extra.append('<p class="kv"><b>Why it matters:</b> %s</p>'
+                     % _h(check["impact"]))
+    if check["fix"] and step is None:
+        extra.append('<p class="kv"><b>What to do:</b> %s</p>'
+                     % _h(check["fix"]))
+    if check["expected"]:
+        extra.append('<p class="kv"><b>Expected:</b> %s</p>'
+                     % _h(check["expected"]))
+    if found:
+        extra.append("<pre>%s</pre>" % _h("\n".join(found)))
+    if check["detail"].strip():
+        extra.append('<p class="kv">%s</p>'
+                     % _h(check["detail"]).replace("\n", "<br>"))
+    if extra:
+        out.append("<details%s><summary>%s</summary>%s</details>"
+                   % (" open" if flagged else "",
+                      "What was found" if flagged else "Details",
+                      "".join(extra)))
+    out.append("</article>")
+    return out
+
+
+def render_html(document):
+    """The report as one self-contained HTML page, returned as a string.
+
+    Same content and order as the text report: each check with its result,
+    then the numbered steps at the end. The steps add what the text report
+    cannot: the folders involved, with a Copy button and a link, and short
+    PowerShell scripts for the cleanups a person would otherwise type by hand.
+    """
+    ids = _Ids()
+    steps = next_steps(document)
+    step_of = dict([(c["id"], n) for n, c in steps])
+    tally = dict(counts(document["checks"]))
+    who = "%s UTC, as %s (%s)" % (
+        document["taken"], document["user"],
+        "as administrator" if document["elevated"] else "not as administrator")
+    out = ["<!doctype html>", '<html lang="en">', "<head>",
+           '<meta charset="utf-8">',
+           '<meta name="viewport" content="width=device-width, '
+           'initial-scale=1">',
+           "<title>ArcGIS Pro Workstation Check</title>",
+           "<style>%s</style>" % _HTML_CSS, "</head>", "<body>",
+           '<header><div class="wrap">']
+    if HTML_ORG_NAME:
+        out.append('<p class="org">%s</p>' % _h(HTML_ORG_NAME))
+    out.append("<h1>ArcGIS Pro workstation check</h1>")
+    out.append('<p class="run">Run on %s</p>' % _h(who))
+    out.append("</div></header>")
+    out.append('<main><div class="wrap">')
+
+    out.append('<div class="tiles">')
+    for status, word in (("Fail", "problems"), ("Warn", "warnings"),
+                         ("Pass", "OK"), ("Info", "for information"),
+                         ("Skipped", "not checked")):
+        out.append('<div class="tile %s"><b>%d</b><span>%s</span></div>'
+                   % (HTML_STATUS_CLASS[status], tally[status], word))
+    out.append("</div>")
+    if steps:
+        verdict = ('%d thing(s) need attention. '
+                   '<a href="#next">Go to what to do next</a>.' % len(steps))
+    elif exit_code(document["checks"]) == 3:
+        verdict = ("Almost nothing could be checked on this machine, so this "
+                   "report cannot say whether anything needs fixing. "
+                   '<a href="#next">See what could not be checked</a>.')
+    else:
+        verdict = "Nothing needs fixing based on what could be checked."
+    out.append('<p class="verdict">%s</p>' % verdict)
+
+    for heading, lede, wanted in (
+            ("Risks to saved edits",
+             "Checks for causes of lost or unsaved work.", True),
+            ("Performance", "Checks for causes of slowness and freezes.",
+             False)):
+        out.append("<section><h2>%s</h2><p class=\"lede\">%s</p>"
+                   % (heading, lede))
+        for check in document["checks"]:
+            if bool(check["dataloss"]) is wanted:
+                out.extend(_html_check(check, step_of.get(check["id"]), ids))
+        out.append("</section>")
+
+    out.append('<section id="next"><h2>What to do next</h2>')
+    if not steps:
+        out.append('<div class="box"><p>%s</p></div>' % (
+            "Almost nothing could be checked on this machine, so this report "
+            "cannot say whether anything needs fixing."
+            if exit_code(document["checks"]) == 3 else
+            "Nothing needs fixing based on what could be checked."))
+    for intro, wanted in (("Start with these. They can cause lost edits:",
+                           True),
+                          ("Then these, which affect speed:", False)):
+        group = [(n, c) for n, c in steps if bool(c["dataloss"]) is wanted]
+        if not group:
+            continue
+        out.append('<p class="group-intro">%s</p><ol class="steps">' % intro)
+        for n, check in group:
+            out.append('<li class="step%s" id="step-%d">'
+                       '<span class="num">%d</span><div class="step-body">'
+                       '<h3>%s <a class="cid" href="#%s">%s</a></h3>'
+                       '<p>%s</p>'
+                       % (" dataloss" if wanted else "", n, n,
+                          _h(check["title"]), _h(check["id"]),
+                          _h(check["id"]), _h(check["fix"])))
+            paths = check_paths(check)
+            if paths:
+                out.append('<p class="sub">Folders involved</p>')
+                out.extend(_html_paths(paths, ids))
+            scripts = cleanup_scripts(check)
+            if scripts:
+                out.append('<p class="sub">Scripts that can help</p>')
+                out.extend(_html_scripts(scripts, ids))
+            out.append("</div></li>")
+        out.append("</ol>")
+    if any([cleanup_scripts(c) for n, c in steps]):
+        out.append('<p class="tip">To run a script: open Windows PowerShell '
+                   'from the Start menu (not as administrator), paste it, '
+                   'and press Enter. Scripts that change anything check that '
+                   'ArcGIS Pro is closed first.</p>')
+
+    if document["fixable"]:
+        out.append('<div class="box"><p><b>prostall can make %d of these '
+                   'changes for you.</b> Close ArcGIS Pro, then run prostall '
+                   'again with <code>--apply</code>:</p><ul>'
+                   % len(document["fixable"]))
+        for cid in document["fixable"]:
+            check = by_id(document["checks"], cid)
+            out.append('<li><a href="#%s">%s</a> [%s]</li>'
+                       % (_h(cid), _h(check["title"]), _h(cid)))
+        out.append("</ul></div>")
+    held = _fix_notes(document)
+    if held:
+        out.append('<div class="box"><p><b>Automatic fixes not done this '
+                   'time:</b></p><ul>')
+        out.extend(['<li>[%s] %s</li>' % (_h(fid), _h(text))
+                    for fid, text in held])
+        out.append("</ul></div>")
+    if document["applied"]:
+        out.append('<div class="box"><p><b>Changed by --apply:</b></p><ul>')
+        for record in document["applied"]:
+            eid = ids.next()
+            out.append('<li>[%s] %s<br>Result: <code>%s</code><br>To undo: '
+                       '<code id="%s">%s</code> <button class="copy" '
+                       'type="button" data-for="%s" data-label="Copy">Copy'
+                       '</button></li>'
+                       % (_h(record["id"]), _h(record["what"]),
+                          _h(record["result"]), eid, _h(record["undo"]), eid))
+        out.append("</ul></div>")
+    unsure = [c for c in document["checks"] if undetermined(c) and c["fix"]]
+    if unsure:
+        out.append('<div class="box"><p><b>These could not be checked.</b> '
+                   'Look at them by hand if they might matter:</p><ul>')
+        for check in unsure:
+            out.append('<li><a href="#%s">%s</a> [%s]: %s</li>'
+                       % (_h(check["id"]), _h(check["title"]),
+                          _h(check["id"]), _h(check["fix"])))
+        out.append("</ul></div>")
+    out.append("</section>")
+    out.append("</div></main>")
+    out.append('<footer><div class="wrap">prostall report format %d. '
+               'Check results only: the scripts above run only if you paste '
+               'them into PowerShell yourself.</div></footer>'
+               % document["prostall"])
+    out.append("<script>%s</script>" % _HTML_JS)
+    out.append("</body></html>")
+    return "\n".join(out) + "\n"
+
+
+def write_html(document, path):
+    """Write the HTML report to one file, creating its folder."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+    handle = open(path, "wb")
+    try:
+        handle.write(render_html(document).encode("utf-8"))
+    finally:
+        handle.close()
+    return path
 
 
 # =============================================================================
@@ -3473,6 +4571,14 @@ class FakeEnv(Env):
         key = _norm(src)
         self._tree[_norm(dst)] = (dst, self._tree.pop(key)[1])
         self.written.append(("rename", src, dst))
+
+    # Every page a run asked to open, across instances, so a test can see
+    # what main() did with an Env it built for itself.
+    opened = []
+
+    def open_file(self, path):
+        FakeEnv.opened.append(path)
+        return None
 
     def network_drives(self):
         return list(self._netdrives)
@@ -4146,15 +5252,16 @@ def self_test():
                         "ONEDRIVE")["status"] == "Info",
           "an interval that is not a number does not crash and does not warn")
     check("does not protect" in decide_backup("c", {}, "LOCAL")["impact"],
-          "and the impact line says plainly that this does not protect her "
-          "feature edits, which is the whole reason the check is named that way")
+          "and the impact line says plainly that this does not protect "
+          "the editor's feature edits, which is the whole reason the check is named that way")
 
     check(decide_storage([])["status"] == "Info",
-          "no recent project: where she works is undetermined")
+          "no recent project: where the editor works is undetermined")
     local_only = decide_storage([(r"C:\GIS\a.aprx", "2026-01-01 00:00", "LOCAL")])
     check(local_only["status"] == "Pass", "every recent project local: Pass")
-    check("every recent project is local" in local_only["title"],
-          "and the title says so, instead of printing the accusation with a "
+    check("every recent project is stored on this computer"
+          in local_only["result"].lower(),
+          "and the result says so, instead of printing the accusation with a "
           "PASS in front of it  <-- pinned defect")
     remote = decide_storage([(r"\\srv\s\a.aprx", "2026-01-01 00:00", "NETWORK"),
                              (r"C:\GIS\b.aprx", "2026-01-01 00:00", "LOCAL")])
@@ -4245,7 +5352,7 @@ def self_test():
     check(decide_sde_files([(r"C:\c.sde", "LOCAL")], 12)["status"] == "Warn",
           "and so does a search index caching a dozen copies of them")
     check("never open or copy" in decide_sde_files([(r"C:\c.sde", "LOCAL")],
-                                                   0)["fix"].lower(),
+                                                   12)["fix"].lower(),
           "the fix says never to open a connection file, because they carry "
           "saved credentials and this tool only ever records their paths")
 
@@ -4824,8 +5931,8 @@ def self_test():
     check("readme.txt" not in by_id(document["checks"], "DL-09")["observed"],
           "a file that is not a dump is not counted as one, because a Windows "
           "name filter also matches the short alias  <-- pinned defect")
-    check("1 dump(s) in the last 45 days"
-          in by_id(document["checks"], "DL-09")["impact"],
+    check("1 from the last 45 days"
+          in by_id(document["checks"], "DL-09")["result"],
           "of two dumps, only the recent one is counted against the incident: "
           "a dump from last year is history, not evidence about this hang")
     check(env.zip_reads == [],
@@ -5079,9 +6186,10 @@ def self_test():
     check(cache_record["undo"].startswith("move "),
           "and the undo moves it straight back")
     applied_text = "\n".join(render(applied_run))
-    check("APPLIED [AP-02]" in applied_text,
+    check("Changed by --apply:" in applied_text
+          and "- [AP-02]" in applied_text,
           "the report names every change that was made")
-    check("undo   :" in applied_text,
+    check("To undo: reg delete" in applied_text,
           "and prints the undo for each one beside it")
     check(applying.isdir(cache_record["result"].split(" -> ")[1]),
           "the renamed folder is still there afterwards, with its contents")
@@ -5115,44 +6223,65 @@ def self_test():
     print("-" * 70)
     print("the report says what the run found, and nothing else")
     text = "\n".join(render(document))
-    check("ACT ON THESE FIRST" in text,
-          "a run with data-loss findings prints the act-first block")
-    check("--- DATA LOSS" in text and "--- PERFORMANCE" in text,
-          "and both sections")
-    check("S3  saved edits are silently gone" in text,
-          "the symptom key is printed, so the impact lines can be read")
-    check("ACT ON THESE FIRST" not in "\n".join(render(healthy)),
-          "a healthy run prints no act-first block at all")
-    check("expect :" not in text, "a plain run does not print the expected text")
-    check("expect :" in "\n".join(render(document, verbose=True)),
+    check("They can cause lost edits:" in text,
+          "a run with data-loss findings lists those steps first")
+    check(text.index("They can cause lost edits:")
+          < text.index("Then these, which affect speed:"),
+          "ahead of the speed steps")
+    check("== RISKS TO SAVED EDITS" in text and "== PERFORMANCE" in text
+          and "== WHAT TO DO NEXT" in text,
+          "and all three sections are there")
+    check(" S3 " not in text and "S1," not in text,
+          "no symptom code is printed: every line reads on its own")
+    first_step = [l for l in render(document) if l.startswith("   1. ")][0]
+    check("[DL-05]" in first_step,
+          "step 1 is the first data-loss finding")
+    check("What to do: see step 1 below." in text,
+          "and the finding points at its step by number")
+    healthy_text = "\n".join(render(healthy))
+    check("They can cause lost edits:" not in healthy_text
+          and "Nothing needs fixing" in healthy_text,
+          "a healthy run prints no steps, and says so")
+    bare_text = "\n".join(render(dict(document, checks=always, fixable=[],
+                                      notes=[], applied=[])))
+    check("Nothing needs fixing" not in bare_text
+          and "Almost nothing could be checked" in bare_text,
+          "a run that measured almost nothing does not call the machine "
+          "fine, the same rule as exit code 3  <-- pinned defect")
+    check("Expected:" not in text,
+          "a plain run does not print the expected text")
+    check("Expected:" in "\n".join(render(document, verbose=True)),
           "and a verbose one does")
-    check("impact :" in text,
-          "a failing check prints its impact even without verbose")
+    check("Why it matters:" in text,
+          "a failing check says why it matters even without verbose")
     quiet_text = "\n".join(render_check(
-        make_check("Q-1", "c", "t", "Pass", "measured", impact="i", fix="f")))
-    check("impact :" not in quiet_text,
-          "a passing check does not, because a clean report should be short")
+        make_check("Q-1", "c", "t", "Pass", "measured", impact="i", fix="f",
+                   result="r")))
+    check("Why it matters" not in quiet_text and "Found:" not in quiet_text
+          and "r" in quiet_text.split("\n")[1],
+          "a passing check prints only its result, so a clean report is short")
     bare_lines = render_check(make_check("Q-2", "c", "t", "Warn",
                                          ["measured", "", "   "]), verbose=True)
-    check(len(bare_lines) == 2,
+    check(len(bare_lines) == 3 and not [l for l in bare_lines if not l.strip()],
           "blank observed lines are dropped, so a multi-line reading does not "
           "print gaps down the middle of the report")
-    check(not [line for line in bare_lines if "impact" in line
-               or "fix" in line or "expect" in line],
+    check(not [line for line in bare_lines if "matters" in line
+               or "What to do" in line or "Expected" in line],
           "and a check that carries no impact, fix or expected text prints "
           "none of those headings empty")
 
     temp_dir = tempfile.mkdtemp(prefix="prostall-selftest-")
     try:
-        text_path, json_path = write_report(document, temp_dir)
-        check(os.path.isfile(text_path) and os.path.isfile(json_path),
-              "--report writes both a text and a JSON report")
+        text_path, json_path, html_path = write_report(document, temp_dir)
+        check(os.path.isfile(text_path) and os.path.isfile(json_path)
+              and os.path.isfile(html_path),
+              "--report writes a text, a JSON and an HTML report")
         handle = io.open(json_path, encoding="utf-8")
         try:
             reloaded = json.loads(handle.read())
         finally:
             handle.close()
-        check(reloaded["prostall"] == 1,
+        check(reloaded["prostall"] == 2,
               "the JSON report carries its format version, so a diff against "
               "an older report from another workstation fails loudly")
         check(reloaded["act_first"] == document["act_first"],
@@ -5174,7 +6303,8 @@ def self_test():
     check(args.sde_server is None and args.portal is None,
           "and no host is probed by default, so a plain run sends no packet  "
           "<-- pinned defect")
-    check(args.report is None, "and writes no file")
+    check(args.report is None and args.html is None, "and writes no file")
+    check(args.no_open is False, "and an HTML report opens by default")
     check(args.self_test is False, "the self-test is off by default")
     check(args.verbose is False, "and so is the long form")
     check(args.sde_port == SDE_PORT,
@@ -5484,8 +6614,8 @@ def self_test():
           "a real run exits 0, 1, 2 or 3, whatever this machine turns out to "
           "be")
     live_document = json.loads(printed)
-    check(live_document["prostall"] == 1,
-          "the JSON it prints carries report version 1, the number a diff "
+    check(live_document["prostall"] == 2,
+          "the JSON it prints carries report version 2, the number a diff "
           "against a known-good workstation is taken at: comparing it to the "
           "constant that defines it would hold for any value")
     check(len(live_document["checks"]) == len(expected_run),
@@ -5504,13 +6634,13 @@ def self_test():
     try:
         code, printed = captured(
             lambda: main(["--report", os.path.join(report_dir, "out"),
-                          "--verbose"]))
+                          "--verbose", "--no-open"]))
         written = sorted(os.listdir(os.path.join(report_dir, "out")))
-        check(len(written) == 2,
-              "--report writes exactly two files, and creates the directory")
+        check(len(written) == 3,
+              "--report writes exactly three files, and creates the directory")
         check("report :" in printed, "and names both of them on the console")
-        check("ACT ON THESE FIRST" in printed
-              or "  FAIL 0   WARN 0" in printed,
+        check("They can cause lost edits:" in printed
+              or "Overall: 0 problem(s), 0 warning(s)" in printed,
               "a real run either lists what to act on first or reports nothing "
               "failing")
     finally:
@@ -5952,12 +7082,12 @@ def self_test():
     jr_dir = tempfile.mkdtemp(prefix="prostall-json-report-")
     try:
         code, out, err = with_env(fake_healthy, ["--json", "--report", jr_dir])
-        check(json.loads(out)["prostall"] == 1,
+        check(json.loads(out)["prostall"] == 2,
               "--json with --report prints one JSON document on stdout  "
               "<-- pinned defect")
         check("report :" in err and "report :" not in out,
               "and the report paths go to stderr")
-        check(len(os.listdir(jr_dir)) == 2, "while both files are written")
+        check(len(os.listdir(jr_dir)) == 3, "while all three files are written")
     finally:
         shutil.rmtree(jr_dir, ignore_errors=True)
 
@@ -5966,7 +7096,7 @@ def self_test():
 
     code, out, err = with_env(OffMachine, ["--json"])
     check("almost every probe" in err and "almost every probe" not in out
-          and json.loads(out)["prostall"] == 1,
+          and json.loads(out)["prostall"] == 2,
           "off Windows the note goes to stderr and stdout stays a document")
 
     # The reading layer, reached with stand-ins instead of left unreached.
@@ -6118,12 +7248,14 @@ def self_test():
           and decide_pro_running(["x"])["dataloss"] is True,
           "DL-12 stays in the data-loss block when Pro is closed as well as "
           "when it runs  <-- pinned defect")
-    check("only SMB client connectivity events" in smb_only["title"],
-          "an SMB-only timeline says so in its title  <-- pinned defect")
+    check("only network file-share (smb) connection events"
+          in smb_only["result"].lower(),
+          "an SMB-only timeline says so in its result  <-- pinned defect")
     some_unreadable = decide_events([], [("C", "z")], 3, [])
-    check("nothing recorded" in some_unreadable["title"]
+    check("nothing recorded" in some_unreadable["result"].lower()
           and "nothing recorded" not in decide_events(
-              [], [("A", "x"), ("B", "y"), ("C", "z")], 3, [])["title"],
+              [], [("A", "x"), ("B", "y"), ("C", "z")], 3,
+              [])["result"].lower(),
           "one unreadable log of three is a quiet timeline and three of "
           "three is an unread one  <-- pinned defect")
     listed = [l for l in _join(decide_events(
@@ -6166,7 +7298,7 @@ def self_test():
     for label, doc in (("healthy", healthy_doc), ("sick", sick_doc)):
         rendered = render(doc)
         split = [n for n, l in enumerate(rendered)
-                 if l.startswith("--- PERFORMANCE")][0]
+                 if l.startswith("== PERFORMANCE")][0]
         placed = [(rendered.count(render_check(c)[0]),
                    [n for n, l in enumerate(rendered)
                     if l == render_check(c)[0]][0] < split, c["dataloss"])
@@ -6176,7 +7308,8 @@ def self_test():
               "%s run: every check prints exactly once, data-loss ahead of "
               "the performance heading and performance after it  "
               "<-- pinned defect" % label)
-        check(bool(doc["fixable"]) == any(["have a fix here" in l
+        check(bool(doc["fixable"]) == any(["can make" in l
+                                           and "changes for you" in l
                                            for l in rendered]),
               "%s run: the fix offer prints exactly when a fix exists  "
               "<-- pinned defect" % label)
@@ -6187,6 +7320,140 @@ def self_test():
                                         sort_keys=True),
           "on a Windows host there is no off-Windows note, and the JSON keys "
           "are sorted so two reports diff cleanly  <-- pinned defect")
+
+    # ------------------------------------------------------- the HTML report
+    print("-" * 70)
+    print("the HTML report: same findings, with folders and scripts")
+    sick_html = render_html(sick_doc)
+    healthy_html = render_html(healthy_doc)
+    check(sick_html.startswith("<!doctype html>")
+          and sick_html.rstrip().endswith("</html>"),
+          "the HTML report is one whole page")
+    check(all([('id="%s"' % c["id"]) in sick_html for c in sick_doc["checks"]]),
+          "every check has a card the steps can link to")
+    check(all([('id="step-%d"' % n) in sick_html
+               for n, c in next_steps(sick_doc)]),
+          "and every step in the to-do list is there, numbered")
+    check("<script src" not in sick_html and "<link" not in sick_html
+          and "http://" not in sick_html and "https://" not in sick_html,
+          "it fetches nothing, so it opens the same on a machine with no "
+          "internet")
+    leaky = dict(sick_doc, checks=[dict(c, result='<b onclick="x">&')
+                                   for c in sick_doc["checks"]])
+    check('<b onclick' not in render_html(leaky)
+          and "&lt;b onclick=&quot;x&quot;&gt;&amp;" in render_html(leaky),
+          "text from the machine is escaped, so a path holding < or & cannot "
+          "break the page  <-- pinned defect")
+    check(find_paths(r"No value named C:\Program Files\ArcGIS\Pro\bin"
+                     r"\ArcGISPro.exe under HKCU\x, so")
+          == [r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"],
+          "a path with spaces in it is found whole, and ends where the "
+          "sentence carries on")
+    check(find_paths(r"see \\gisfs01\projects\Roads.aprx.")
+          == [r"\\gisfs01\projects\Roads.aprx"],
+          "a share path is found, without the full stop after it")
+    check(find_paths(r"C:\ 5.00 GB free of 500.00 GB") == [],
+          "and a bare drive followed by a number is not taken for a folder")
+    temp_check = by_id(sick_doc["checks"], "PF-07")
+    check(check_paths(temp_check)[:2]
+          == [r"C:\Users\editor\AppData\Local\Temp\ArcGISProTemp12345",
+              r"C:\Users\editor\AppData\Local\Temp\ArcGISProTemp24680"],
+          "the session folders that may hold unsaved work are listed first, "
+          "by their full path")
+    check(len(check_paths(by_id(sick_doc["checks"], "DL-11"))) <= 5,
+          "a long list of files is shown as the folders that hold them")
+    check("Copy path" in sick_html and "file:///C:/Users/editor/AppData/"
+          "Local/ESRI/Local%20Caches" in sick_html,
+          "each folder has a Copy button and a link that opens it")
+    temp_scripts = cleanup_scripts(temp_check)
+    recycle = [code for title, what, code in temp_scripts
+               if "Recycle" in title][0]
+    check("$Preview = $true" in recycle and "SendToRecycleBin" in recycle
+          and "Remove-Item" not in recycle,
+          "the folder cleanup previews by default and sends to the Recycle "
+          "Bin, never deleting outright  <-- pinned defect")
+    check("'ArcGISProTemp12345', 'ArcGISProTemp24680'" in recycle
+          and "*.aprx" in recycle,
+          "and it keeps the folders this report says may hold unsaved work")
+    every_script = [code for c in sick_doc["checks"]
+                    for t, w, code in cleanup_scripts(c)]
+    check(every_script and not [code for code in every_script
+                                if "Remove-Item" in code or " del " in code],
+          "no offered script deletes a file outright")
+    check(all([code.startswith("& {") and code.rstrip().endswith("}")
+               for code in every_script if "\n" in code]),
+          "every multi-line script is one block, so a guard that says stop "
+          "stops the whole paste, not one line of it  <-- pinned defect")
+    check(all(["Get-Process ArcGISPro" in code
+               for c in sick_doc["checks"] for t, w, code in cleanup_scripts(c)
+               if "Rename-Item" in code or "Recycle" in t]),
+          "a script that moves or recycles Pro's files first checks that Pro "
+          "is closed")
+    check("Scripts that can help" in sick_html
+          and "Scripts that can help" not in healthy_html,
+          "scripts are offered only for steps, so a healthy machine gets none")
+    check("Nothing needs fixing" in healthy_html,
+          "a healthy run says nothing needs fixing")
+    check("Almost nothing could be checked"
+          in render_html(dict(document, checks=always, fixable=[], notes=[],
+                              applied=[])),
+          "and a run that measured nothing does not claim to be healthy")
+    html_dir = tempfile.mkdtemp(prefix="prostall-html-")
+    try:
+        target = os.path.join(html_dir, "sub", "report.html")
+        FakeEnv.opened[:] = []
+        code, out, err = with_env(fake_healthy, ["--html", target])
+        check(os.path.isfile(target) and "web page : " + target in out,
+              "--html writes the page, creates its folder, and names it")
+        check(FakeEnv.opened == [target] and "Opened the web page" in out,
+              "and opens it in the browser")
+        FakeEnv.opened[:] = []
+        with_env(fake_healthy, ["--html", target, "--no-open"])
+        check(FakeEnv.opened == [], "but not with --no-open")
+        report_into = os.path.join(html_dir, "both")
+        with_env(fake_healthy, ["--html", target, "--report", report_into])
+        check(FakeEnv.opened == [target],
+              "with --html and --report together only one page opens")
+        FakeEnv.opened[:] = []
+        with_env(fake_healthy, ["--report", report_into])
+        check(len(FakeEnv.opened) == 1
+              and FakeEnv.opened[0].startswith(report_into)
+              and FakeEnv.opened[0].endswith(".html"),
+              "--report alone opens the page it wrote")
+        FakeEnv.opened[:] = []
+        with_env(fake_healthy, [])
+        check(FakeEnv.opened == [],
+              "and a plain run, which writes nothing, opens nothing")
+        quiet = Env()
+        quiet.windows = False
+        quiet.getenv = lambda name: None
+        check("no desktop" in (quiet.open_file(target) or ""),
+              "off Windows with no desktop it declines rather than start a "
+              "text browser in the terminal")
+        code, out, err = with_env(fake_healthy, ["--json", "--html", target])
+        check(json.loads(out)["prostall"] == 2 and "web page" in err,
+              "with --json the page is still written and stdout stays one "
+              "document")
+    finally:
+        shutil.rmtree(html_dir, ignore_errors=True)
+
+    # ------------------------------------------------- the one-click launcher
+    launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "prostall.bat")
+    if os.path.isfile(launcher):
+        handle = open(launcher, "rb")
+        try:
+            batch = handle.read().decode("ascii")
+        finally:
+            handle.close()
+        check("\n" not in batch.replace("\r\n", ""),
+              "prostall.bat has Windows line endings throughout, which cmd.exe "
+              "needs to find its labels  <-- pinned defect")
+        check('"%SCRIPT%" --report' in batch and "--apply" not in batch,
+              "the launcher writes the report and never runs --apply")
+        check("pause" in batch,
+              "and it waits for a key, so the window does not vanish with the "
+              "result")
 
     # ------------------------------------------------------- the harness itself
     print("-" * 70)
@@ -6323,12 +7590,21 @@ def _parse(argv):
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     ap.add_argument("--verbose", action="store_true",
-                    help="print the expected text and the evidence lines too")
+                    help="print the evidence, expected values and details for "
+                         "every check, not only the ones that need action")
     ap.add_argument("--json", action="store_true",
                     help="print the report as JSON instead of the console form")
     ap.add_argument("--report", metavar="DIR", default=REPORT_DIR,
-                    help="write the text and JSON reports into this directory. "
+                    help="write the text, JSON and HTML reports into this "
+                         "directory. "
                          "Without it nothing is written anywhere.")
+    ap.add_argument("--html", metavar="FILE", default=HTML_FILE,
+                    help="also write the report as a web page to this file, "
+                         "with copyable folder paths and cleanup scripts. "
+                         "--report writes one too. It opens in your "
+                         "browser unless --no-open is given.")
+    ap.add_argument("--no-open", dest="no_open", action="store_true",
+                    help="write the HTML report but do not open it")
     ap.add_argument("--sde-server", dest="sde_server", metavar="HOST",
                     default=SDE_SERVER,
                     help="TCP-probe this enterprise geodatabase host. Connect "
@@ -6406,21 +7682,41 @@ def main(argv=None):
         for line in render(document, args.verbose):
             print(line)
 
+    # With --json, stdout is one document and nothing else.
+    out = sys.stderr if args.json else sys.stdout
+    if args.html:
+        try:
+            html_path = write_html(document, args.html)
+        except (OSError, IOError) as exc:
+            print("error: could not write the HTML report: %s" % exc,
+                  file=sys.stderr)
+            return USAGE_ERROR
+        print("", file=out)
+        print("  web page : %s" % html_path, file=out)
+
     if args.report:
         try:
-            text_path, json_path = write_report(document, args.report,
-                                                args.verbose)
+            paths = write_report(document, args.report, args.verbose)
         except (OSError, IOError) as exc:
             print("error: could not write the report: %s" % exc,
                   file=sys.stderr)
             return USAGE_ERROR
-        # With --json, stdout is one document and nothing else.
-        out = sys.stderr if args.json else sys.stdout
         print("", file=out)
-        print("  report : %s" % text_path, file=out)
-        print("  report : %s" % json_path, file=out)
+        for path in paths:
+            print("  report : %s" % path, file=out)
         print("  Diff the JSON against a known-good workstation to isolate "
               "what is different about this one.", file=out)
+        if not args.html:
+            html_path = paths[2]
+
+    # One page opens, even when both --html and --report wrote one.
+    if (args.html or args.report) and OPEN_HTML and not args.no_open:
+        why = env.open_file(html_path)
+        if why:
+            print("  Could not open the web page automatically (%s). Open "
+                  "the file above in a browser." % why, file=out)
+        else:
+            print("  Opened the web page in your browser.", file=out)
 
     return exit_code(document["checks"])
 
