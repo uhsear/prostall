@@ -2,13 +2,13 @@
 
 Diagnose why ArcGIS Pro is slow on this workstation, and never report a finding the machine did
 not produce. Read-only by default: nothing changes, and no host is contacted unless you name it.
-Two flags write: `--report` creates two new files in a folder you name, and `--apply` runs two
-gated fixes. The one read that crosses the network unasked is a project folder that already lives
+Three flags write: `--report` creates three new files in a folder you name, `--html` writes one web
+page, and `--apply` runs two gated fixes. `prostall.bat` runs it with one double-click. The one read that crosses the network unasked is a project folder that already lives
 on a share, as Pro does when it opens the project.
 
 An editor tells you Pro takes five minutes to open, that it hangs for two or three minutes in the
-middle of an edit, and that sometimes the work she saved before the hang is gone afterwards. There
-is no error message. There is no crash dump, because she ended the hang with Task Manager and that
+middle of an edit, and that sometimes the work they saved before the hang is gone afterwards. There
+is no error message. There is no crash dump, because they ended the hang with Task Manager and that
 writes no dump at all.
 
 So you run a diagnostic. It prints a red line at the top of the report, under "act on these first",
@@ -168,7 +168,7 @@ the tool end to end on the machine running this, read-only
 PASS  a real run exits 0, 1, 2 or 3, whatever this machine turns out to be
 PASS  a plain run applies nothing to the machine it is run on  <-- pinned defect
 PASS  and not one record of a real run pairs a verdict with text saying it measured nothing  <-- pinned defect
-PASS  --report writes exactly two files, and creates the directory
+PASS  --report writes exactly three files, and creates the directory
 ----------------------------------------------------------------------
 a verdict needs a measurement: the first review round
 PASS  --ap is a usage error, exit 64 and never the lost-edits code 2  <-- pinned defect
@@ -193,7 +193,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-629 assertions, 0 failed
+674 assertions, 0 failed
 ```
 
 ## Requirements
@@ -255,6 +255,22 @@ report, from the editor's own session, and says which of them it could not read.
 
 Run it in the editor's own session, without elevation, while Pro is closed.
 
+The simplest way is to double-click **`prostall.bat`**, kept in the same folder as `prostall.py`.
+It:
+
+- finds a Python: ArcGIS Pro's own first, which is on every machine with Pro, then the `py`
+  launcher, then `python`;
+- runs the check with `--report "%LOCALAPPDATA%\prostall\reports"`;
+- opens the web page;
+- ends with a one-line result and waits for a key, so the window does not close on you.
+
+It never runs `--apply`. To add options to every run, such as `--sde-server`, set
+`PROSTALL_ARGS` at the top of the file; to send the reports elsewhere, change `REPORT_DIR` there.
+Options typed after it on a command line are passed through, for example
+`prostall.bat --no-open`.
+
+From a command prompt:
+
 ```
 python prostall.py
 ```
@@ -273,9 +289,11 @@ That adds two bounded TCP probes and writes the report as text and as JSON.
 | Flag | Default | What it does |
 |---|---|---|
 | `--self-test` | off | Run the offline assertions and exit. Wins over every other flag. |
-| `--verbose` | off | Print the expected text and the evidence lines as well. |
+| `--verbose` | off | Print the evidence, expected values and details for every check, not only the ones that need action. |
 | `--json` | off | Print the report as JSON on stdout instead of the console form. Stdout is that one document and nothing else, also with `--report`. |
-| `--report DIR` | none | Write the text and JSON reports into this directory, creating it. This is the one write besides `--apply`. Without it nothing is written. |
+| `--report DIR` | none | Write the text, JSON and HTML reports into this directory, creating it. Without it, or `--html`, nothing is written. |
+| `--html FILE` | none | Write the report as one web page to this file, creating its folder, and open it in the browser. See [The HTML report](#the-html-report). |
+| `--no-open` | off | Write the HTML report but do not open it. |
 | `--sde-server HOST` | none | TCP-probe this geodatabase host. Connect only, no credential. Without it the probe is skipped. A URL, a path or a space in the value is refused with exit 64. |
 | `--sde-port PORT` | `1433` | Port for that probe. |
 | `--portal HOST` | none | TCP-probe this portal host on 443. Without it the probe is skipped. Refused like `--sde-server`. |
@@ -288,6 +306,33 @@ accepted, so a prefix of `--apply` cannot arm the fix path.
 There is no password option and no connection string. Nothing here signs in to anything, and a
 `.sde` connection file is recorded by path and never opened, because those files can carry a saved
 credential.
+
+## Configuration
+
+The block at the top of `prostall.py` holds everything an operator is expected to change. Edit it
+and run as usual.
+
+| Setting | Shipped value | What it does |
+|---|---|---|
+| `CHECKS_ENABLED` | every check `True` | One entry per check id. `False` turns that check off. |
+| `ALLOW_APPLY` | `True` | `False` refuses `--apply` with exit 64, so that copy can never change the machine. |
+| `FIXES_ENABLED` | both `True` | `False` turns off one fix: `AP-01` (cache aside) or `AP-02` (GPU preference). |
+| `SDE_SERVER`, `SDE_PORT`, `PORTAL`, `TIMEOUT_MS`, `REPORT_DIR`, `HTML_FILE` | `None`, `1433`, `None`, `4000`, `None`, `None` | What a run uses when the matching flag is not given. A flag always wins. |
+| Thresholds | as listed in the file | Memory, disk, cache, latency, event window, share listing and `.aprx` bounds. |
+| `OPEN_HTML` | `True` | Open the HTML report in the default browser after writing it. `False` never opens it. |
+| `HTML_ORG_NAME` | `New York City Emergency Management` | The line above the title of the HTML report. `""` prints none. |
+| `DEFAULT_PRO_EXE` | `C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe` | Where Pro is assumed to be when the registry does not say. |
+
+A check turned off is still in both reports, as Skipped with "turned off in CHECKS_ENABLED". A
+check that vanished would read as one that passed. A fix whose check is off is refused, even under
+`--apply`. An id in either table that no check or fix owns, or a value that is not `True` or
+`False`, stops the run with exit 64, so a typo cannot leave a check running that you meant to turn
+off.
+
+Nothing in the block arms `--apply`; it stays a command-line flag. The self-test pins the safe
+defaults, so setting `SDE_SERVER`, `PORTAL`, `REPORT_DIR` or `HTML_FILE` there turns those assertions red
+on purpose: a plain run would then send a packet or write a file. Changing a threshold can also
+fail the assertions that pin a verdict at the shipped value.
 
 ## What it checks
 
@@ -378,13 +423,15 @@ findings a workstation had no way to produce.
 
 ## The five statuses
 
-| Status | Means |
-|---|---|
-| `Pass` | Measured, and it is what it should be. |
-| `Warn` | Measured, and it is a contributing cause. |
-| `Fail` | Measured, and it is a cause. |
-| `Info` | Read, and it decides nothing. |
-| `Skipped` | Not read at all. The probe threw, produced nothing, or was never asked to run. |
+| Status | Console label | Means |
+|---|---|---|
+| `Pass` | `OK` | Measured, and it is what it should be. |
+| `Warn` | `WARNING` | Measured, and it is a contributing cause. |
+| `Fail` | `PROBLEM` | Measured, and it is a cause. |
+| `Info` | `INFO` | Read, and it decides nothing. |
+| `Skipped` | `NOT CHECKED` | Not read at all. The probe threw, produced nothing, was turned off, or was never asked to run. |
+
+The JSON report keeps the five status names; the labels are only how the console prints them.
 
 `Pass`, `Warn` and `Fail` are verdicts. `Info` and `Skipped` are not, and the difference is
 enforced rather than documented:
@@ -408,7 +455,7 @@ enforced rather than documented:
 | 1 | Performance findings, none of them bearing on lost edits. |
 | 2 | At least one finding bearing on lost edits. |
 | 3 | No finding, and nothing was determined either. |
-| 64 | A usage error, or `--report` could not write its files. |
+| 64 | A usage error, or `--report` or `--html` could not write its files. |
 
 Code 3 exists because a wrapper reads the exit code and never sees the note on stderr. A run that
 could read nothing, such as PowerShell blocked or a host that is not Windows, has no finding, and
@@ -444,12 +491,45 @@ nobody will run twice.
 
 ## Output
 
-The console report lists the data-loss block, then the performance block, then a tally, then the
-findings to act on first. `--report` writes the same thing as text, plus a JSON document beside it:
+The console report has three parts. Every check prints its status and one plain sentence saying
+what it found. A `PROBLEM` or `WARNING` also says why it matters, lists the evidence, and points at
+its step in the to-do list. `OK`, `INFO` and `NOT CHECKED` print just the sentence; `--verbose`
+prints the evidence for those too.
+
+```
+== RISKS TO SAVED EDITS =======================================================
+
+PROBLEM      Where projects are stored  [DL-05]
+             1 of 1 recent project(s) are stored on a network drive or in
+             OneDrive, not on this computer.
+             Why it matters: Pro reads and writes many small files while you
+             work. Over a network or a sync folder this makes projects slow to
+             open, causes freezes, and a save that times out can lose edits.
+             What to do: see step 1 below.
+             Found:
+               ONEDRIVE 2026-09-16 20:59  C:\Users\editor\OneDrive - Example\Documents\...
+
+OK           Account being checked  [DL-00]
+             prostall ran as editor, and no other account on this computer has
+             ArcGIS Pro data.
+```
+
+The last part, `WHAT TO DO NEXT`, is a numbered to-do list: the steps that bear on lost edits come
+first, then the ones that affect speed. After the list come:
+
+- the changes `--apply` can make;
+- any automatic fix that was held back, and the check that held it;
+- what `--apply` changed, with the command to undo each change;
+- the checks that could not be completed, each with how to check it by hand.
+
+When almost nothing could be measured, the report says it cannot tell whether anything needs
+fixing, rather than calling the machine fine.
+
+`--report` writes the same thing as text, an HTML page (below), and a JSON document:
 
 ```json
 {
- "prostall": 1,
+ "prostall": 2,
  "taken": "2026-09-17 20:59",
  "user": "editor",
  "elevated": false,
@@ -460,14 +540,15 @@ findings to act on first. `--report` writes the same thing as text, plus a JSON 
  "notes": ["would apply [AP-01] Rename the ESRI local cache folder aside so Pro rebuilds it.",
            "skip [AP-02] PF-11 is already healthy (Pass)"],
  "checks": [{"id": "DL-06", "category": "Storage", "status": "Fail", "dataloss": true,
-             "title": "Documents redirected into OneDrive (Known Folder Move)",
+             "title": "Documents folder synced by OneDrive",
+             "result": "The Documents folder has been moved into OneDrive, ...",
              "observed": "...", "expected": "...", "impact": "...", "fix": "...",
-             "autofixable": false, "detail": ""}]
+             "autofixable": false, "measured": true, "detail": ""}]
 }
 ```
 
-With `--json` and `--report` together, stdout stays one JSON document and the three `report :`
-lines go to stderr.
+Report format 2 added `result` and `measured` to every check. With `--json` and `--report`
+together, stdout stays one JSON document and the `report :` lines go to stderr.
 
 Diff that JSON against a workstation that is known to be fast. That is the fastest way to find what
 is different about this one, and it is why every timestamp in the report is UTC: two machines in
@@ -475,6 +556,43 @@ different time zones would otherwise disagree on every dated line.
 
 A check-only run still evaluates the fix gates and prints what it would have done. `applied` is
 empty unless `--apply` was given, and the self-test asserts that across a whole run.
+
+### The HTML report
+
+`--html FILE` (and `--report`) writes the same report as one web page, styled after the NYCEM
+brand guide: NYCEM Blue header, Electric Blue headings, Sky Blue accents, the program colours for
+the status badges, and Aptos type (Owners when it is installed). It is a single file with nothing
+fetched from the internet, so it opens the same on a locked-down workstation as in an email.
+
+Once the page is written it opens in your default browser. With both `--html` and `--report`,
+only the `--html` page opens. `--no-open`, or `OPEN_HTML = False` in the configuration block, turns
+this off. A plain run writes no page, so it opens nothing. Off Windows it opens only when there
+is a desktop session, so it never starts a text browser in your terminal. If the page cannot be
+opened, the run says so and carries on.
+
+It has the same checks in the same order as the text report, with the evidence folded under
+each card. In "What to do next", each step also has:
+
+- **Folders involved**: every folder or file path the check found, with a **Copy path** button and
+  an **Open folder** link. A long list of files is shown as the folders that hold them.
+- **Scripts that can help**: short PowerShell scripts for the cleanup the step describes, each with
+  a **Copy script** button. prostall never runs them; you paste them into PowerShell yourself.
+
+| Step | Script | Changes anything? |
+|---|---|---|
+| Leftover session folders (PF-07) | List the session folders with size and project count | No |
+| Leftover session folders (PF-07) | Recycle session folders older than 7 days | Previews first; `$Preview = $false` sends them to the Recycle Bin. Keeps any folder with a project file and any the report flagged |
+| Pro local cache (PF-06) | Move the cache aside, as `--apply` does | Renames the folder and prints the undo |
+| ArcGIS Pro crash files (DL-09) | Zip the crash files onto the Desktop for a support case | Only writes the zip |
+| Crashes and freezes (DL-13) | Save the events to a CSV on the Desktop | Only writes the CSV |
+| Online-only OneDrive files (DL-07) | "Always keep on this device" for the project folder | Downloads the files |
+| Power plan (PF-15) | Switch to High performance | Yes, and prints the command to switch back |
+| Free disk space (PF-13) | List the biggest folders in the profile; open Storage Sense | No |
+| Graphics card (PF-11) | Open Windows graphics settings | No |
+
+No script deletes a file outright. Each multi-line script is one `& { }` block, so when a guard
+stops it (for example because ArcGIS Pro is still open), the whole paste stops. A script that moves
+or recycles Pro's files checks that Pro is closed first.
 
 ## Limits
 
@@ -544,10 +662,18 @@ empty unless `--apply` was given, and the self-test asserts that across a whole 
   `wevtutil` output is decoded as UTF-8 with replacement characters, so a non-ASCII event field can
   be garbled.
 - A character that the console code page cannot hold prints as a `\uXXXX` escape when output is
-  redirected. The `--report` files and `--json` are encoded for you and are not affected.
+  redirected. The `--report`, `--html` and `--json` output is encoded for you and is not affected.
 - The report carries the account name, local paths, connection file names (names only, never
   contents), exclusion paths and layer names. Read it before you send it to anyone.
-- If `--report` cannot be written, the exit code is 64 whatever the findings were.
+- `prostall.bat` waits for a key at the end, so it is for people, not for scheduled tasks. Call
+  `prostall.py` directly from a script.
+- `prostall.bat` must keep Windows line endings (`.gitattributes` makes git keep them). Saved with
+  Unix line endings, cmd.exe can fail to find its labels.
+- If `--report` or `--html` cannot be written, the exit code is 64 whatever the findings were.
+- The HTML report finds paths in the evidence text by pattern. A path in an unusual sentence can
+  be cut short or missed; the full evidence is always under the card.
+- The **Open folder** link uses `file:///`. Some browsers and policies block those links from a
+  page; **Copy path** and pasting into File Explorer's address bar always works.
 
 ## Sources
 

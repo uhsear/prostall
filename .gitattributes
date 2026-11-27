@@ -1,0 +1,2 @@
+# cmd.exe misreads a batch file saved with Unix line endings.
+*.bat text eol=crlf
