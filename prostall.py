@@ -48,6 +48,107 @@ import sys
 import time
 
 # =============================================================================
+# CONFIGURATION. Everything an operator is expected to change lives here.
+# =============================================================================
+
+# -- Which checks run ---------------------------------------------------------
+# False turns a check off. It still appears in both reports, as Skipped with
+# "turned off in CHECKS_ENABLED", because a check that silently vanished would
+# read as one that passed. A fix whose check is off is refused. An id not
+# listed here runs; an id listed here that no check owns is a startup error.
+CHECKS_ENABLED = {
+    # Data loss
+    "DL-00": True,   # Diagnostic is running as the editor
+    "DL-05": True,   # Project storage location
+    "DL-03": True,   # Project backup interval
+    "DL-04": True,   # Network adapter power management
+    "DL-06": True,   # OneDrive Known Folder Move
+    "DL-07": True,   # Cloud placeholders
+    "DL-08": True,   # Offline Files
+    "DL-09": True,   # Crash dumps
+    "DL-10": True,   # SDE server reachability (also needs SDE_SERVER)
+    "DL-11": True,   # SDE connection files
+    "DL-12": True,   # Pro running during the diagnostic
+    "DL-13": True,   # Event timeline
+    "PF-07": True,   # Leftover session folders
+    # Performance
+    "PF-02": True,   # SMB client configuration
+    "PF-03": True,   # Directory listing time on the project share
+    "PF-04": True,   # Pro version and patch level
+    "PF-05": True,   # Rendering and display settings
+    "PF-06": True,   # ESRI local caches
+    "PF-08": True,   # Search index state
+    "PF-11": True,   # Per-app GPU preference
+    "PF-12": True,   # Physical memory
+    "PF-13": True,   # Free disk space
+    "PF-15": True,   # Active power plan
+    "PF-17": True,   # Microsoft Defender exclusions
+    "PF-19": True,   # Portal reachability (also needs PORTAL)
+    "PF-22": True,   # Layer refresh timers from the .aprx
+    "PF-26": True,   # Roaming profile
+    "PF-27": True,   # Symbology refresh (S4)
+}
+
+# -- Which fixes --apply may run ----------------------------------------------
+# ALLOW_APPLY False refuses --apply outright, so no run on this copy can change
+# the machine. FIXES_ENABLED turns off one fix at a time. Neither one arms
+# anything: a fix still needs --apply on the command line.
+ALLOW_APPLY = True
+FIXES_ENABLED = {
+    "AP-01": True,   # Rename the ESRI local cache folder aside (acts on PF-06)
+    "AP-02": True,   # Pin Pro to the high-performance GPU (acts on PF-11)
+}
+
+# -- Run defaults -------------------------------------------------------------
+# What a run uses when the matching flag is not given. A flag always wins.
+# None for a host means that probe is skipped and no packet is sent.
+SDE_SERVER = None       # --sde-server, such as "gisdb01"
+SDE_PORT = 1433         # --sde-port
+PORTAL = None           # --portal, such as "gis.example.org"
+TIMEOUT_MS = 4000       # --timeout, the bound on each network probe
+REPORT_DIR = None       # --report, None writes no file
+
+# Where Pro is assumed to be installed when the registry does not say.
+DEFAULT_PRO_EXE = r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"
+
+# -- Thresholds ---------------------------------------------------------------
+SDE_LATENCY_WARN_MS = 250       # a LAN SQL host answers far inside this
+PORTAL_LATENCY_WARN_MS = 1500   # a portal over the WAN is allowed to be slower
+MIN_MEMORY_GB = 16.0            # below this, enterprise SDE editing pages
+LOW_FREE_MEMORY_GB = 2.0
+MIN_FREE_DISK_GB = 20.0
+MIN_FREE_DISK_PCT = 10.0
+CACHE_BIG_BYTES = 2 * 1024 ** 3
+CACHE_BIG_FILES = 20000
+CACHE_STALE_DAYS = 30
+CACHE_OLD_DAYS = 90
+CACHE_STALE_RATIO = 0.8
+CRASH_RECENT_DAYS = 45
+PROTEMP_MANY = 25
+INDEX_MANY_CONNECTIONS = 10
+
+# The event timeline reads this many days back, and at most this many events
+# per log. A log that hits the cap is reported as capped, not as complete.
+EVENT_WINDOW_DAYS = 14
+EVENT_MAX = 200
+
+# One directory listing on the project share. These are this tool's
+# allowances, not a published figure: Pro lists folders many times while it
+# opens a project, so a single listing in the hundreds of milliseconds is
+# already the slow open the editor describes.
+SHARE_LIST_WARN_MS = 400
+SHARE_LIST_FAIL_MS = 1500
+SHARE_LIST_LIMIT = 500
+SHARE_FOLDERS_TIMED = 2
+
+# The .aprx read is bounded, because a project on a share is exactly where a
+# full read is slow.
+APRX_MAX_PROJECTS = 3
+APRX_MAX_ENTRIES = 300
+APRX_MAX_ENTRY_BYTES = 4 * 1024 ** 2
+APRX_MAX_BYTES = 32 * 1024 ** 2
+
+# =============================================================================
 # THE STATUS CONTRACT. This is the whole point of the tool.
 # =============================================================================
 
@@ -102,43 +203,6 @@ SYMPTOMS = (
 # an older report from a known-good workstation fails loudly instead of quietly.
 REPORT_VERSION = 1
 
-# Thresholds, named here rather than buried at the call site.
-SDE_LATENCY_WARN_MS = 250       # a LAN SQL host answers far inside this
-PORTAL_LATENCY_WARN_MS = 1500   # a portal over the WAN is allowed to be slower
-MIN_MEMORY_GB = 16.0            # below this, enterprise SDE editing pages
-LOW_FREE_MEMORY_GB = 2.0
-MIN_FREE_DISK_GB = 20.0
-MIN_FREE_DISK_PCT = 10.0
-CACHE_BIG_BYTES = 2 * 1024 ** 3
-CACHE_BIG_FILES = 20000
-CACHE_STALE_DAYS = 30
-CACHE_OLD_DAYS = 90
-CACHE_STALE_RATIO = 0.8
-CRASH_RECENT_DAYS = 45
-PROTEMP_MANY = 25
-INDEX_MANY_CONNECTIONS = 10
-
-# The event timeline reads this many days back, and at most this many events
-# per log. A log that hits the cap is reported as capped, not as complete.
-EVENT_WINDOW_DAYS = 14
-EVENT_MAX = 200
-
-# One directory listing on the project share. These are this tool's
-# allowances, not a published figure: Pro lists folders many times while it
-# opens a project, so a single listing in the hundreds of milliseconds is
-# already the slow open the editor describes.
-SHARE_LIST_WARN_MS = 400
-SHARE_LIST_FAIL_MS = 1500
-SHARE_LIST_LIMIT = 500
-SHARE_FOLDERS_TIMED = 2
-
-# The .aprx read is bounded, because a project on a share is exactly where a
-# full read is slow.
-APRX_MAX_PROJECTS = 3
-APRX_MAX_ENTRIES = 300
-APRX_MAX_ENTRY_BYTES = 4 * 1024 ** 2
-APRX_MAX_BYTES = 32 * 1024 ** 2
-
 # Get-MpPreference does not fail for a caller who may not see the exclusion
 # lists. It puts this text where each list would be. Compared as a path, it
 # reports every exclusion missing on a machine that may have them all.
@@ -166,7 +230,6 @@ EMPTY_GDBTABLE_BYTES = 4096
 HIGH_PERFORMANCE_PLAN = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 GPU_PREFERENCE_KEY = r"HKCU\Software\Microsoft\DirectX\UserGpuPreferences"
 GPU_PREFERENCE_WANTED = "GpuPreference=2;"
-DEFAULT_PRO_EXE = r"C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe"
 PRO_REG_KEY = r"HKLM\SOFTWARE\ESRI\ArcGISPro"
 
 
@@ -3011,12 +3074,58 @@ def registrations(env, facts, opts):
     ]
 
 
+def check_ids():
+    """Every registered check id, in report order. Probes are not called."""
+    return [reg[0] for reg in registrations(None, {}, {})]
+
+
+def fix_ids():
+    return [fix[0] for fix in FIXES]
+
+
+def config_problems(checks_enabled, fixes_enabled):
+    """Why the configuration block cannot be used, as a list of sentences.
+
+    An id nobody owns is a typo, and a typo in a switch that turns a check
+    off would otherwise leave that check running while the operator believes
+    it is off.
+    """
+    problems = []
+    for name, table, known in (("CHECKS_ENABLED", checks_enabled, check_ids()),
+                               ("FIXES_ENABLED", fixes_enabled, fix_ids())):
+        for key in sorted(table):
+            if key not in known:
+                problems.append("%s names %r, which is not one of %s"
+                                % (name, key, ", ".join(known)))
+            elif not isinstance(table[key], bool):
+                problems.append("%s[%r] is %r, not True or False"
+                                % (name, key, table[key]))
+    return problems
+
+
 def run_checks(env, opts):
-    """Run every check under containment. Returns (checks, facts)."""
+    """Run every check under containment. Returns (checks, facts).
+
+    opts["checks_enabled"] maps an id to False to turn that check off. Without
+    the key every check runs, which is what the self-test relies on.
+    """
     checks = []
     facts = {}
+    enabled = opts.get("checks_enabled") or {}
     for cid, category, title, dataloss, probe in registrations(env, facts,
                                                                opts):
+        if enabled.get(cid, True) is False:
+            add_check(checks, cid=cid, category=category, title=title,
+                      status="Skipped", dataloss=dataloss, measured=False,
+                      observed="Turned off in CHECKS_ENABLED, so it was not "
+                               "measured this run.",
+                      expected="The check runs.",
+                      impact="Unknown. This cause was neither ruled in nor "
+                             "out, and no fix will run off this record.",
+                      fix="Set %s to True in CHECKS_ENABLED and re-run."
+                          % cid)
+            continue
+
         def body(target, probe=probe):
             add_check(target, **probe())
         safe_check(checks, cid, category, title, body, dataloss=dataloss)
@@ -3099,15 +3208,19 @@ FIXES = (
 )
 
 
-def apply_fixes(checks, env, facts, do_apply):
+def apply_fixes(checks, env, facts, do_apply, enabled=None):
     """Returns (applied, notes). With do_apply false, applied is always empty.
 
     The gate is evaluated either way, so a check-only run still prints exactly
-    which fixes would have run and which were refused, and why.
+    which fixes would have run and which were refused, and why. enabled maps a
+    fix id to False to turn that fix off; without it every fix is eligible.
     """
     applied = []
     notes = []
     for cid, target, per_user, blocker, handler in FIXES:
+        if (enabled or {}).get(cid, True) is False:
+            notes.append("off [%s] turned off in FIXES_ENABLED" % cid)
+            continue
         allowed, why = apply_gate(checks, target, per_user)
         if not allowed:
             notes.append("skip [%s] %s" % (cid, why))
@@ -3137,7 +3250,8 @@ def apply_fixes(checks, env, facts, do_apply):
 def run(env, opts):
     """One whole diagnostic. Returns the report document."""
     checks, facts = run_checks(env, opts)
-    applied, notes = apply_fixes(checks, env, facts, opts.get("apply", False))
+    applied, notes = apply_fixes(checks, env, facts, opts.get("apply", False),
+                                 opts.get("fixes_enabled"))
     return {
         "prostall": REPORT_VERSION,
         "taken": stamp(env.now()),
@@ -5063,8 +5177,9 @@ def self_test():
     check(args.report is None, "and writes no file")
     check(args.self_test is False, "the self-test is off by default")
     check(args.verbose is False, "and so is the long form")
-    check(args.sde_port == 1433, "the database port defaults to 1433")
-    check(args.timeout == 4000, "and the probe timeout to four seconds")
+    check(args.sde_port == SDE_PORT,
+          "the database port defaults to SDE_PORT")
+    check(args.timeout == TIMEOUT_MS, "and the probe timeout to TIMEOUT_MS")
     check(args.json is False, "the console format is the default output")
     check(_parse(["--apply"]).apply is True, "--apply is read")
     check(_parse(["--self-test"]).self_test is True, "--self-test is read")
@@ -6097,6 +6212,54 @@ def self_test():
     check(buffer.getvalue().count("FAIL  ") == 4,
           "and every one of them printed a line the operator can see")
 
+    # ----------------------------------------------- the configuration block
+    print("-" * 70)
+    print("the configuration block: a switch that is off says so")
+    check(sorted(CHECKS_ENABLED) == sorted(check_ids()),
+          "CHECKS_ENABLED lists every registered check, so none is hidden "
+          "from the operator editing it")
+    check(sorted(FIXES_ENABLED) == sorted(fix_ids()),
+          "and FIXES_ENABLED lists every fix")
+    check(config_problems(CHECKS_ENABLED, FIXES_ENABLED) == [],
+          "the shipped configuration is accepted")
+    check(config_problems({"PF-6": False}, {})
+          and config_problems({}, {"AP-03": False})
+          and config_problems({"PF-06": "no"}, {}),
+          "a mistyped id or a value that is not a bool is refused, so a "
+          "check the operator turned off cannot quietly keep running")
+    off_env = fake_sick()
+    off_run = run(off_env, opts_with(apply=True,
+                                     checks_enabled={"PF-06": False},
+                                     fixes_enabled={"AP-02": False}))
+    off_check = by_id(off_run["checks"], "PF-06")
+    check(off_check is not None and off_check["status"] == "Skipped"
+          and "CHECKS_ENABLED" in off_check["observed"],
+          "a check turned off is still in the report, as Skipped, rather "
+          "than vanishing and reading as a pass")
+    check(len(off_run["checks"]) == len(check_ids()),
+          "and the report still has one record per check")
+    check(off_run["applied"] == [] and off_env.written == [],
+          "the fix whose check is off is refused, and the fix turned off "
+          "never runs, even with --apply")
+    check([n for n in off_run["notes"] if n.startswith("off [AP-02]")],
+          "and the note says which fix was turned off")
+    real_allow = ALLOW_APPLY
+    globals()["ALLOW_APPLY"] = False
+    try:
+        code, _out, err = run_main(["--apply"])
+        check(code == 64 and "ALLOW_APPLY" in err,
+              "ALLOW_APPLY False refuses --apply before any check runs")
+    finally:
+        globals()["ALLOW_APPLY"] = real_allow
+    real_checks = CHECKS_ENABLED
+    globals()["CHECKS_ENABLED"] = {"PF-6": False}
+    try:
+        code, _out, err = run_main([])
+        check(code == 64 and "PF-6" in err,
+              "a typo in CHECKS_ENABLED stops the run with a usage error")
+    finally:
+        globals()["CHECKS_ENABLED"] = real_checks
+
     print("-" * 70)
     lines, code = summarize(passed[0], failed)
     for line in lines:
@@ -6163,21 +6326,23 @@ def _parse(argv):
                     help="print the expected text and the evidence lines too")
     ap.add_argument("--json", action="store_true",
                     help="print the report as JSON instead of the console form")
-    ap.add_argument("--report", metavar="DIR",
+    ap.add_argument("--report", metavar="DIR", default=REPORT_DIR,
                     help="write the text and JSON reports into this directory. "
                          "Without it nothing is written anywhere.")
     ap.add_argument("--sde-server", dest="sde_server", metavar="HOST",
+                    default=SDE_SERVER,
                     help="TCP-probe this enterprise geodatabase host. Connect "
                          "only, no credential. Without it the probe is skipped.")
-    ap.add_argument("--sde-port", dest="sde_port", type=int, default=1433,
+    ap.add_argument("--sde-port", dest="sde_port", type=int, default=SDE_PORT,
                     metavar="PORT",
-                    help="port for the geodatabase probe (default 1433)")
-    ap.add_argument("--portal", metavar="HOST",
+                    help="port for the geodatabase probe (default %d)"
+                         % SDE_PORT)
+    ap.add_argument("--portal", metavar="HOST", default=PORTAL,
                     help="TCP-probe this portal host on 443. Without it the "
                          "probe is skipped.")
-    ap.add_argument("--timeout", type=int, default=4000, metavar="MS",
+    ap.add_argument("--timeout", type=int, default=TIMEOUT_MS, metavar="MS",
                     help="bound on each network probe in milliseconds "
-                         "(default 4000)")
+                         "(default %d)" % TIMEOUT_MS)
     ap.add_argument("--apply", action="store_true",
                     help="run the gated fixes. Off by default. Each one is "
                          "refused unless its check actually failed, prints its "
@@ -6193,6 +6358,14 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    for problem in config_problems(CHECKS_ENABLED, FIXES_ENABLED):
+        print("error: the configuration block: %s." % problem,
+              file=sys.stderr)
+        return USAGE_ERROR
+    if args.apply and not ALLOW_APPLY:
+        print("error: --apply is turned off by ALLOW_APPLY in the "
+              "configuration block, so nothing was run.", file=sys.stderr)
+        return USAGE_ERROR
     if args.timeout < 1:
         print("error: --timeout must be at least 1 millisecond.",
               file=sys.stderr)
@@ -6223,7 +6396,9 @@ def main(argv=None):
                          "sde_port": args.sde_port,
                          "portal": args.portal,
                          "timeout": args.timeout,
-                         "apply": args.apply})
+                         "apply": args.apply,
+                         "checks_enabled": CHECKS_ENABLED,
+                         "fixes_enabled": FIXES_ENABLED})
 
     if args.json:
         print(json.dumps(document, indent=1, sort_keys=True))

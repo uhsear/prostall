@@ -193,7 +193,7 @@ PASS  a false check, a missing exception, a wrong exception and an accepted argu
 PASS  not one of those four counted as a pass
 PASS  and every one of them printed a line the operator can see
 ----------------------------------------------------------------------
-629 assertions, 0 failed
+639 assertions, 0 failed
 ```
 
 ## Requirements
@@ -288,6 +288,31 @@ accepted, so a prefix of `--apply` cannot arm the fix path.
 There is no password option and no connection string. Nothing here signs in to anything, and a
 `.sde` connection file is recorded by path and never opened, because those files can carry a saved
 credential.
+
+## Configuration
+
+The block at the top of `prostall.py` holds everything an operator is expected to change. Edit it
+and run as usual.
+
+| Setting | Shipped value | What it does |
+|---|---|---|
+| `CHECKS_ENABLED` | every check `True` | One entry per check id. `False` turns that check off. |
+| `ALLOW_APPLY` | `True` | `False` refuses `--apply` with exit 64, so that copy can never change the machine. |
+| `FIXES_ENABLED` | both `True` | `False` turns off one fix: `AP-01` (cache aside) or `AP-02` (GPU preference). |
+| `SDE_SERVER`, `SDE_PORT`, `PORTAL`, `TIMEOUT_MS`, `REPORT_DIR` | `None`, `1433`, `None`, `4000`, `None` | What a run uses when the matching flag is not given. A flag always wins. |
+| Thresholds | as listed in the file | Memory, disk, cache, latency, event window, share listing and `.aprx` bounds. |
+| `DEFAULT_PRO_EXE` | `C:\Program Files\ArcGIS\Pro\bin\ArcGISPro.exe` | Where Pro is assumed to be when the registry does not say. |
+
+A check turned off is still in both reports, as Skipped with "turned off in CHECKS_ENABLED". A
+check that vanished would read as one that passed. A fix whose check is off is refused, even under
+`--apply`. An id in either table that no check or fix owns, or a value that is not `True` or
+`False`, stops the run with exit 64, so a typo cannot leave a check running that you meant to turn
+off.
+
+Nothing in the block arms `--apply`; it stays a command-line flag. The self-test pins the safe
+defaults, so setting `SDE_SERVER`, `PORTAL` or `REPORT_DIR` there turns those three assertions red
+on purpose: a plain run would then send a packet or write a file. Changing a threshold can also
+fail the assertions that pin a verdict at the shipped value.
 
 ## What it checks
 
