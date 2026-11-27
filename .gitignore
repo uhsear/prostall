@@ -11,3 +11,5 @@ logs/
 *.env
 credentials*
 *token*
+.claude/
+.devcontainer/
