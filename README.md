@@ -336,7 +336,7 @@ fail the assertions that pin a verdict at the shipped value.
 
 ## What it checks
 
-Twenty-eight checks. The thirteen that bear on lost edits run first and print first, because
+Thirty-two checks. The thirteen that bear on lost edits run first and print first, because
 silent edit loss outranks every performance finding.
 
 **Data loss**, in the order they run and print.
@@ -376,12 +376,30 @@ silent edit loss outranks every performance finding.
 | PF-22 | Layer refresh timers and the default geodatabase, read from inside the three newest recent `.aprx` files, only while DL-12 shows Pro closed. The report says how many older ones were not read. |
 | PF-26 | Whether a roaming profile carries the ESRI settings folder. |
 | PF-27 | Symbology that does not refresh after a field calculation. |
+| PF-30 | Why Pro may sit at "Creating geoprocessing cache": Python variables (`PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`) set for every program, Pro pointed at a conda environment cloned under an older release, and a build-up of geoprocessing XML log files. The `g*.cache` files themselves are listed, not graded. |
+| PF-31 | The SQL Server ODBC drivers installed, an older driver beside a supported one, and ODBC tracing left on. |
+| PF-32 | How long the database server's name takes to resolve, apart from the connect DL-10 times. Only with `--sde-server`. |
+| PF-33 | Add-in folders Pro reads at every start, and whether any is on a share or no longer reachable. |
 
 PF-07 keeps its performance id and runs in the data-loss block on purpose. An earlier version
 reported those folders as a count and a size and called it disk churn, which routed a possible
 recovery lead for the lost work into the performance section and out of the act-first list.
 
 ### How the newer checks stay honest
+
+- **PF-30, geoprocessing cache.** Python variables are read from the registry (the user and
+  machine environment), not from prostall's own process, because the launcher that started
+  prostall may set Python variables of its own. A clone's release is read from its `conda-meta`
+  record names (`arcpy-3.2.0-....json`), without starting its Python. An old clone Pro is not using
+  is listed and not graded. If which environment Pro uses cannot be read, an old clone makes the
+  check `Info`, not a verdict either way. A third-party package or add-in that breaks the cache
+  build cannot be told apart from a working one by reading files, so the fix names it and the
+  check does not grade it. The 1000-file log allowance is this tool's, not an Esri figure.
+- **PF-31, ODBC.** "SQL Server", the driver every copy of Windows carries, is never counted as a
+  second installed version. With no supported driver, the check is `Info` unless a host was given
+  on the SQL Server port, because the geodatabase may not be SQL Server at all.
+- **PF-32, name lookup.** Skipped without `--sde-server`, so no lookup is made unasked. The 200 ms
+  allowance is this tool's.
 
 - **DL-04, adapter power.** One adapter that reads `Disabled` beside one nobody could read is
   `Info`, never `Pass`. An unelevated read often answers nothing for the setting, and did on the
@@ -589,6 +607,28 @@ each card. In "What to do next", each step also has:
 | Power plan (PF-15) | Switch to High performance | Yes, and prints the command to switch back |
 | Free disk space (PF-13) | List the biggest folders in the profile; open Storage Sense | No |
 | Graphics card (PF-11) | Open Windows graphics settings | No |
+| Geoprocessing cache (PF-30) | Remove the Python variables from your account | Yes, and prints each old value to put back |
+| Geoprocessing cache (PF-30) | Switch Pro back to `arcgispro-py3` with `proswap` | Yes; the old clone is left in place |
+| Geoprocessing cache (PF-30) | Clear the geoprocessing cache files; move the log files aside | Moves them aside and prints the undo |
+| Database drivers (PF-31) | Turn off ODBC tracing for your account; list the SQL Server drivers | The first does, and prints the undo |
+| Name lookup (PF-32) | Time the lookup three times and show the DNS servers | No |
+| Add-ins (PF-33) | List the add-in folders; clear the add-in cache | The second moves it aside and prints the undo |
+
+After the steps, every report, a healthy one included, has an **Optional clean-up** section. A
+cache can slow Pro down while every measurement reads healthy, so these are offered whatever the
+checks found. They are listed lightest first, and any or all of them can be run with Pro closed:
+
+| Script | What it moves aside |
+|---|---|
+| Clear the geoprocessing cache files | Only the `g*.cache` files in the local cache, into a dated folder beside it |
+| Move the whole local cache aside | The local cache folder (map, tile and geoprocessing caches) |
+| Rebuild the search index | `%LOCALAPPDATA%\ESRI\Index` |
+| Clear the add-in cache | `%LOCALAPPDATA%\ESRI\ArcGISPro\AssemblyCache` |
+| Move the geoprocessing log files aside | `%APPDATA%\ESRI\ArcGISPro\ArcToolbox\History` |
+| Do all of the above at once | All four folders, in one paste |
+| Reset ArcGIS Pro's settings (soft reset) | Esri's soft reset: the `ArcGISPro*` folders under `%LOCALAPPDATA%\ESRI`, `%APPDATA%\ESRI\ArcGISPro`, and the `HKCU\Software\ESRI\ArcGISPro` key after a `.reg` backup on the Desktop. Previews first; `$Preview = $false` resets. Favorites, recent projects, sign-in and options go back to defaults |
+
+Pro rebuilds every one of these on its next start, so that first start is slower than usual.
 
 No script deletes a file outright. Each multi-line script is one `& { }` block, so when a guard
 stops it (for example because ArcGIS Pro is still open), the whole paste stops. A script that moves
@@ -598,6 +638,8 @@ or recycles Pro's files checks that Pro is closed first.
 
 - It reads a workstation. It does not read a server. Nothing here opens a geodatabase, runs a
   query, or signs in to a portal, and the two network probes are TCP connects that send nothing.
+  With `--sde-server`, PF-32 also times the name lookup for that host, which asks the DNS server and
+  sends nothing to the host.
 - Off Windows almost every check reports `Info` or `Skipped`, and the run exits 3. That is correct
   behaviour and not a port: an unreadable registry is not an absent value, and the tool says so rather than guessing.
 - Several readings need Pro's own configuration. Run it in the editor's session. DL-00 exists to
@@ -709,6 +751,20 @@ Every Windows, Esri and Defender behaviour the newer checks rely on, and where i
   `CIMDocument.md`). The specification does not say that an `.aprx` holds those documents as JSON
   inside a zip. That was read from real Pro projects on the test workstation, where the relative
   `.` home folder was resolved as described above.
+- The geoprocessing cache as `g*.cache` files in the local cache, built once per release, and the
+  causes named for a slow build (old Python environments, Python variables, a third-party
+  package):
+  [How to delete ArcGIS Pro temporary files](https://support.esri.com/en-us/knowledge-base/how-to-delete-arcgis-pro-temporary-files-000026912),
+  [Optimise and improve Creating Geoprocessing Cache](https://community.esri.com/t5/arcgis-pro-ideas/optimise-and-improve-creating-geoprocessing-cache/idi-p/1638656),
+  [Creating Geoprocessing Cache sits there forever](https://community.esri.com/t5/arcgis-pro-questions/arcgis-pro-2-8-creating-geoprocessing-cache-sits/td-p/1085889).
+- The soft reset folders and registry key:
+  [How to perform an ArcGIS Pro soft reset](https://support.esri.com/en-us/knowledge-base/how-to-perform-an-arcgis-pro-soft-reset-000027631).
+- Several ODBC driver versions installed side by side:
+  [Underlying DBMS error](https://support.esri.com/en-us/knowledge-base/error-arcgis-pro-database-connection-underlying-dbms-er-000039635).
+- Not yet confirmed on the test workstation, and to be checked against a real one before the
+  verdict is trusted: the `PythonCondaEnv` registry value PF-30 reads for the active environment,
+  the geoprocessing history folder path, and whether an add-in folder is registered as a value
+  name or as its data (PF-33 accepts either).
 
 ## Related
 

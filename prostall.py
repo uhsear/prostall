@@ -88,6 +88,10 @@ CHECKS_ENABLED = {
     "PF-22": True,   # Layer refresh timers and default geodatabase
     "PF-26": True,   # Roaming profile
     "PF-27": True,   # Map not redrawing after a field calculation
+    "PF-30": True,   # Geoprocessing cache and Python setup
+    "PF-31": True,   # Database drivers (ODBC)
+    "PF-32": True,   # Name lookup for the database server
+    "PF-33": True,   # Add-ins loaded at start-up
 }
 
 # -- Which fixes --apply may run ----------------------------------------------
@@ -154,6 +158,14 @@ APRX_MAX_PROJECTS = 3
 APRX_MAX_ENTRIES = 300
 APRX_MAX_ENTRY_BYTES = 4 * 1024 ** 2
 APRX_MAX_BYTES = 32 * 1024 ** 2
+
+# Geoprocessing and database start-up. Both are this tool's allowances, not a
+# published figure. Pro writes one XML file per tool run into the history
+# folder when geoprocessing logging is on, and nothing ever prunes it. A name
+# lookup on a LAN answers in a few milliseconds; Pro looks the database host up
+# again for every connection it opens at start-up.
+GP_HISTORY_MANY = 1000
+DNS_WARN_MS = 200
 
 # =============================================================================
 # THE STATUS CONTRACT. This is the whole point of the tool.
@@ -239,6 +251,34 @@ HIGH_PERFORMANCE_PLAN = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 GPU_PREFERENCE_KEY = r"HKCU\Software\Microsoft\DirectX\UserGpuPreferences"
 GPU_PREFERENCE_WANTED = "GpuPreference=2;"
 PRO_REG_KEY = r"HKLM\SOFTWARE\ESRI\ArcGISPro"
+PRO_USER_KEY = r"HKCU\Software\ESRI\ArcGISPro"
+
+# Where Windows keeps the environment variables a newly started Pro inherits.
+# Read from the registry and not from this process: the launcher that started
+# prostall may have set Python variables of its own.
+ENVIRONMENT_KEYS = (
+    ("user", r"HKCU\Environment"),
+    ("machine",
+     r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+)
+PYTHON_VARIABLES = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+
+# Each installed ODBC driver is one subkey here. ODBC tracing writes every
+# database call to a log file, and is switched on per user or per machine.
+ODBC_DRIVERS_KEY = r"HKLM\SOFTWARE\ODBC\ODBCINST.INI"
+ODBC_TRACE_KEYS = (("user", r"HKCU\Software\ODBC\ODBC.INI\ODBC"),
+                   ("machine", r"HKLM\SOFTWARE\ODBC\ODBC.INI\ODBC"))
+# The SQL Server drivers ArcGIS Pro 3.x supports. "SQL Server" alone is the
+# driver every copy of Windows carries, and it is never counted as a second
+# installed version.
+ODBC_SUPPORTED = ("ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server")
+ODBC_BUILTIN = "SQL Server"
+
+# Add-in folders Pro reads at every start, set per user or by an administrator.
+ADDIN_FOLDER_KEYS = (
+    ("user", PRO_USER_KEY + r"\Settings\Add-In Folders"),
+    ("machine", PRO_REG_KEY + r"\Settings\Add-In Folders"),
+)
 
 
 class UnmeasuredFinding(ValueError):
@@ -1597,6 +1637,311 @@ def decide_symbology(feature_caching):
             "pane. Report it to Esri with the Pro version (PF-04).")
 
 
+# ------------------------------------- geoprocessing and database start-up
+
+def major_minor(version):
+    """"3.4.2" -> "3.4", or None. A release is compared on these two parts."""
+    match = re.match(r"\s*(\d+)\.(\d+)", "%s" % (version or ""))
+    return "%s.%s" % match.groups() if match else None
+
+
+_ARCPY_META = re.compile(r"^arcpy(?:-base)?-(\d+\.\d+)[.\-]", re.IGNORECASE)
+
+
+def arcpy_version(meta_names):
+    """The arcpy release a conda environment holds, from its conda-meta names.
+
+    conda names each installed package's record <name>-<version>-<build>.json,
+    so the record says which Pro release the environment was cloned from
+    without starting its Python.
+    """
+    for name in meta_names:
+        match = _ARCPY_META.match(name)
+        if match and name.lower().endswith(".json"):
+            return match.group(1)
+    return None
+
+
+def decide_geoprocessing(pro_version, cache_path, gp_files, python_vars,
+                         active_env, clones, history):
+    """PF-30. Why Pro sits at "Creating geoprocessing cache".
+
+    Esri builds that cache once per release, and a first build takes seconds
+    on a supported machine. One that is rebuilt at every start, or takes
+    minutes, has a cause, and the three this reads are the ones Esri names:
+    Python variables that point Pro's Python at another installation, an
+    environment cloned under an older release, and a third-party package that
+    breaks the build. The last cannot be told apart from a working package by
+    reading files, so it is named in the fix and not graded.
+
+    pro_version: "3.4" or None. gp_files: [(name, size, age_days)] or None
+    when the cache folder could not be read. python_vars: [(scope, name,
+    value)]. active_env: the environment Pro is set to use, or None when that
+    could not be read. clones: [(name, arcpy release or None)]. history:
+    (path, files, bytes) or None when the folder is absent.
+    """
+    title = "Geoprocessing cache and Python setup"
+    if not pro_version and gp_files is None:
+        return dict(
+            cid="PF-30", category="ArcGISPro", status="Info", measured=False,
+            title=title,
+            result="Could not check: neither ArcGIS Pro nor its cache folder "
+                   "was found.",
+            observed="No Pro version in the registry and no local cache "
+                     "folder, so the geoprocessing setup could not be read.",
+            expected="A readable Pro install and cache folder.",
+            fix="Run prostall as the editor, on a machine with ArcGIS Pro "
+                "installed.")
+    release = major_minor(pro_version)
+    stale = [(name, ver) for name, ver in clones
+             if release and ver and major_minor(ver) != release]
+    active_name = ntpath.basename((active_env or "").rstrip("\\/")) or None
+    active_stale = [name for name, _ver in stale
+                    if active_name and name.lower() == active_name.lower()]
+    problems = []
+    if python_vars:
+        problems.append("%s set for every program, so Pro's Python can load "
+                        "another installation's packages"
+                        % " and ".join(sorted(set([n for _s, n, _v
+                                                   in python_vars]))))
+    if active_stale:
+        problems.append("Pro is set to use %s, an environment cloned from an "
+                        "older release" % active_stale[0])
+    if history and history[1] >= GP_HISTORY_MANY:
+        problems.append("%d geoprocessing log files have built up"
+                        % history[1])
+
+    observed = ["Pro release = %s" % (pro_version or "<absent>")]
+    if gp_files is None:
+        observed.append("%s  <could not list the geoprocessing cache files>"
+                        % (cache_path or "<no cache folder>"))
+    elif not gp_files:
+        observed.append("%s  no geoprocessing cache file yet (g*.cache)"
+                        % cache_path)
+    else:
+        newest = min([age for _n, _s, age in gp_files])
+        observed.append("%s  %d geoprocessing cache file(s), %s, newest "
+                        "written %.1f day(s) ago"
+                        % (cache_path, len(gp_files),
+                           format_bytes(sum([s for _n, s, _a in gp_files])),
+                           newest))
+    for scope, name, value in python_vars:
+        observed.append("%s = %s  (%s variable)" % (name, value, scope))
+    if not python_vars:
+        observed.append("PYTHONPATH, PYTHONHOME, PYTHONSTARTUP: not set")
+    observed.append("active environment = %s"
+                    % (active_env or "<not recorded in the registry>"))
+    for name, ver in clones:
+        observed.append("cloned environment %s: arcpy %s%s"
+                        % (name, ver or "<unknown>",
+                           "  <older release>" if (name, ver) in stale else ""))
+    if history:
+        observed.append("%s  %d log file(s), %s"
+                        % (history[0], history[1], format_bytes(history[2])))
+
+    if problems:
+        status = "Warn"
+        result = "Geoprocessing start-up is slowed: %s." % "; ".join(problems)
+    elif stale and not active_name:
+        status = "Info"
+        result = ("An environment cloned from an older release is on this "
+                  "machine, and which environment Pro uses could not be read.")
+    else:
+        status = "Pass"
+        result = ("Nothing found that makes Pro rebuild its geoprocessing "
+                  "cache.")
+    return dict(
+        cid="PF-30", category="ArcGISPro", status=status, title=title,
+        result=result, observed=observed,
+        expected="No Python variables set for every program, Pro using its "
+                 "own environment or a clone made under this release, and a "
+                 "geoprocessing cache built once per release in seconds.",
+        impact="Pro shows \"Creating geoprocessing cache\" at start-up and "
+               "geoprocessing tools are slow to open until it finishes. This "
+               "is a slow project open, not lost data.",
+        fix="With Pro closed, use the scripts in the HTML report: remove the "
+            "Python variable, switch Pro back to arcgispro-py3 (or re-clone "
+            "it under this release), then move the geoprocessing cache files "
+            "aside so Pro builds them once, cleanly. If the wait comes back at "
+            "the next start, a third-party package or add-in is the usual "
+            "cause: test with add-ins turned off, and see PF-33.",
+        autofixable=False)
+
+
+def decide_odbc(readable, drivers, traces, sql_server_named):
+    """PF-31. The SQL Server drivers and ODBC tracing.
+
+    Pro reaches a SQL Server geodatabase through a Microsoft ODBC driver. Esri
+    asks for one supported driver, and advises removing an older one that sits
+    beside it. Tracing writes every database call to a log file, which turns
+    each connection Pro opens at start-up into disk work.
+
+    drivers: installed driver names. traces: [(scope, path)] where tracing is
+    on. sql_server_named: a server was given on the SQL Server port.
+    """
+    title = "Database drivers (ODBC)"
+    if not readable:
+        return dict(
+            cid="PF-31", category="Geodatabase", status="Info", measured=False,
+            title=title,
+            result="Could not check: the registry could not be read.",
+            observed="The ODBC driver list could not be read on this platform.",
+            expected="A readable driver list.",
+            fix="Run prostall on the Windows workstation itself.")
+    sql = [d for d in drivers if "sql server" in d.lower()]
+    supported = [d for d in sql if d in ODBC_SUPPORTED]
+    older = [d for d in sql if d not in ODBC_SUPPORTED and d != ODBC_BUILTIN]
+    problems = []
+    if traces:
+        problems.append("ODBC tracing is on (%s), so every database call is "
+                        "written to a log file"
+                        % ", ".join([s for s, _p in traces]))
+    if supported and older:
+        problems.append("an older SQL Server driver (%s) is installed beside "
+                        "the supported one" % ", ".join(older))
+    if not supported and sql_server_named:
+        problems.append("no supported SQL Server driver is installed (Pro "
+                        "needs %s)" % " or ".join(ODBC_SUPPORTED))
+    observed = ["SQL Server drivers: %s" % (", ".join(sql) or "<none>"),
+                "ODBC tracing: %s" % (", ".join(["on (%s, %s)" % (s, p)
+                                                  for s, p in traces])
+                                       or "off")]
+    if problems:
+        status = "Warn"
+        result = "Database connections are slowed: %s." % "; ".join(problems)
+    elif not supported:
+        status = "Info"
+        result = ("No supported SQL Server driver is installed. That is fine "
+                  "unless the geodatabase is SQL Server.")
+    else:
+        status = "Pass"
+        result = "%s is installed and ODBC tracing is off." % supported[-1]
+    return dict(
+        cid="PF-31", category="Geodatabase", status=status, title=title,
+        result=result, observed=observed,
+        expected="One supported driver (%s), no older SQL Server driver "
+                 "beside it, and tracing off." % " or ".join(ODBC_SUPPORTED),
+        impact="Each connection Pro reopens at start-up waits on the driver, "
+               "so a slow driver setup is a slow project open.",
+        fix="Turn ODBC tracing off with the script in the HTML report (or in "
+            "ODBC Data Sources (64-bit) > Tracing > Stop Tracing Now). Ask IT "
+            "to remove an older SQL Server driver, or to install ODBC Driver "
+            "18 for SQL Server.",
+        autofixable=False)
+
+
+def decide_dns(host, lookup):
+    """PF-32. How long the database server's name takes to resolve.
+
+    DL-10 times the name lookup and the connect together. A lookup that is
+    slow on its own is a DNS or VPN problem, and Pro repeats it for every
+    connection it opens, so it is split out here.
+
+    lookup: None when no host was given, else (addresses, elapsed_ms, error).
+    """
+    title = "Name lookup for the database server"
+    if not host:
+        return dict(
+            cid="PF-32", category="Network", status="Skipped", measured=False,
+            title=title,
+            result="Not checked: no server name was given.",
+            observed="No host was given, so nothing was measured this run. "
+                     "Network probes are opt-in.",
+            expected="A name that resolves quickly.",
+            fix="To test it, run prostall again with --sde-server <server "
+                "name>.")
+    addresses, elapsed, error = lookup
+    if addresses is None:
+        return dict(
+            cid="PF-32", category="Network", status="Info", measured=False,
+            title=title,
+            result="Could not check: the name %s was not found." % host,
+            observed="%s did not resolve after %d ms (%s), so the lookup "
+                     "time was not measured this run." % (host, elapsed, error),
+            expected="A host name that resolves.",
+            fix="Check the spelling and that the VPN is connected.")
+    observed = "%s -> %s in %d ms" % (host, ", ".join(addresses[:4]), elapsed)
+    if elapsed > DNS_WARN_MS:
+        return dict(
+            cid="PF-32", category="Network", status="Warn", title=title,
+            result="Finding %s on the network took %d ms (should be under "
+                   "%d ms)." % (host, elapsed, DNS_WARN_MS),
+            observed=observed,
+            expected="A lookup well inside %d ms." % DNS_WARN_MS,
+            impact="Pro looks the server up for each connection it opens, so "
+                   "a slow lookup is paid many times over in a slow project "
+                   "open.",
+            fix="Give these results to the network team: the DNS servers this "
+                "machine uses, or the VPN's, are slow to answer. Connecting by "
+                "the server's full name (server.domain) can help.")
+    return dict(
+        cid="PF-32", category="Network", status="Pass", title=title,
+        result="%s was found in %d ms." % (host, elapsed),
+        observed=observed,
+        expected="A lookup well inside %d ms." % DNS_WARN_MS)
+
+
+def decide_addins(folders, cache_path, cached):
+    """PF-33. Add-ins Pro loads at every start.
+
+    Pro reads each registered add-in folder at start-up, and a folder on a
+    share, or one that no longer exists, makes it wait on the network first.
+    Add-ins are also the usual third-party cause of a geoprocessing cache that
+    is rebuilt at every start.
+
+    folders: [(scope, path, class, exists)]. cache_path: the add-in cache
+    folder, or None when the profile could not be found. cached: how many
+    add-ins are in it.
+    """
+    title = "Add-ins loaded at start-up"
+    if cache_path is None:
+        return dict(
+            cid="PF-33", category="ArcGISPro", status="Info", measured=False,
+            title=title,
+            result="Could not check: the user profile was not found.",
+            observed="LOCALAPPDATA was not set, so the add-in cache could not "
+                     "be read.",
+            expected="A readable add-in cache.",
+            fix="Run prostall in the editor's own session.")
+    slow = [(s, p) for s, p, cls, ok in folders if cls == "NETWORK" and ok]
+    gone = [(s, p) for s, p, _c, ok in folders if not ok]
+    observed = ["%s  %d add-in(s) cached" % (cache_path, cached)]
+    observed += ["add-in folder (%s): %s  %s%s"
+                 % (s, p, cls, "" if ok else "  <not reachable>")
+                 for s, p, cls, ok in folders]
+    if not folders:
+        observed.append("no add-in folders registered")
+    problems = []
+    if gone:
+        problems.append("%d add-in folder(s) cannot be reached (%s)"
+                        % (len(gone), ", ".join([p for _s, p in gone])))
+    if slow:
+        problems.append("%d add-in folder(s) are on a network share (%s)"
+                        % (len(slow), ", ".join([p for _s, p in slow])))
+    if problems:
+        return dict(
+            cid="PF-33", category="ArcGISPro", status="Warn", title=title,
+            result="Pro waits on the network for add-ins at start-up: %s."
+                   % "; ".join(problems),
+            observed=observed,
+            expected="Add-in folders on this computer, or reachable quickly.",
+            impact="Pro reads every add-in folder before it opens, so a slow "
+                   "or missing share is a slow start every time.",
+            fix="Ask IT to remove the add-in folders that no longer exist, "
+                "and to copy add-ins from the share to this computer. If the "
+                "add-ins misbehave, the HTML report has a script that moves "
+                "the add-in cache aside so Pro rebuilds it.",
+            autofixable=False)
+    return dict(
+        cid="PF-33", category="ArcGISPro", status="Pass", title=title,
+        result="%d add-in(s) cached; no add-in folder is on the network."
+               % cached,
+        observed=observed,
+        expected="Add-in folders on this computer, or reachable quickly.",
+        impact="If Pro still rebuilds its geoprocessing cache at every start, "
+               "an add-in is the usual cause even when its folder is local.")
+
+
 # ------------------------------------------------ the causes added in 1.6
 
 def as_list(value):
@@ -2384,6 +2729,29 @@ class Env(object):
             return []
         return out
 
+    def reg_values(self, path):
+        """Every value under one key as {name: data}, or an empty dict."""
+        if not self.windows:
+            return {}
+        out = {}
+        try:
+            import winreg
+            key = self._open_key(path)
+            try:
+                index = 0
+                while True:
+                    try:
+                        name, data, _kind = winreg.EnumValue(key, index)
+                    except OSError:
+                        break
+                    out[name] = data
+                    index += 1
+            finally:
+                key.Close()
+        except Exception:
+            return {}
+        return out
+
     def reg_write(self, path, name, value):
         """Write one string value. Only reached from --apply."""
         import winreg
@@ -2629,6 +2997,23 @@ class Env(object):
             finally:
                 sock.close()
         return False, took(), error
+
+    def resolve(self, host):
+        """(addresses, elapsed_ms, None) or (None, elapsed_ms, reason).
+
+        The name lookup on its own, which tcp() folds into its connect time.
+        Nothing is sent to the host itself.
+        """
+        started = time.time()
+        try:
+            infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+        except (socket.gaierror, UnicodeError) as exc:
+            return None, int((time.time() - started) * 1000), "%s" % exc
+        addresses = []
+        for info in infos:
+            if info[4][0] not in addresses:
+                addresses.append(info[4][0])
+        return addresses, int((time.time() - started) * 1000), None
 
     # -- read-only PowerShell, event log, share and project reads (1.6) ------
 
@@ -3152,6 +3537,80 @@ def probe_symbology(env, facts):
     return decide_symbology(cfg(facts.get("settings"), "ManageFeatureCaching"))
 
 
+def probe_geoprocessing(env, facts):
+    local = env.getenv("LOCALAPPDATA") or ""
+    appdata = env.getenv("APPDATA") or ""
+    cache = facts.get("cache_path")
+    gp_files = None
+    if cache and env.isdir(cache):
+        entries, unreadable = env.scan(cache, depth=1, limit=30000)
+        if not unreadable:
+            now = env.now()
+            gp_files = [(e.name, e.size, (now - e.mtime) / 86400.0)
+                        for e in entries if not e.isdir
+                        and re.match(r"^g\d*\.cache$", e.name, re.IGNORECASE)]
+    python_vars = []
+    for scope, key in ENVIRONMENT_KEYS:
+        values = dict([(k.upper(), v) for k, v in env.reg_values(key).items()])
+        for name in PYTHON_VARIABLES:
+            if values.get(name):
+                python_vars.append((scope, name, values[name]))
+    active = (env.reg(PRO_USER_KEY, "PythonCondaEnv")
+              or env.reg(PRO_REG_KEY, "PythonCondaEnv"))
+    clones = []
+    envs_root = ntpath.join(local, "ESRI", "conda", "envs") if local else ""
+    for name in env.subdirs(envs_root):
+        meta = ntpath.join(envs_root, name, "conda-meta")
+        entries, _ = env.scan(meta, depth=1, limit=5000)
+        clones.append((name, arcpy_version([e.name for e in entries])))
+    history = None
+    folder = ntpath.join(appdata, "ESRI", "ArcGISPro", "ArcToolbox", "History")
+    if appdata and env.isdir(folder):
+        entries, _ = env.scan(folder, depth=1, limit=100000)
+        files = [e for e in entries if not e.isdir]
+        history = (folder, len(files), sum([e.size for e in files]))
+    facts["gp_history"] = history
+    return decide_geoprocessing(env.reg(PRO_REG_KEY, "Version"), cache,
+                                gp_files, python_vars, active, clones, history)
+
+
+def probe_odbc(env, facts, opts):
+    drivers = env.reg_subkeys(ODBC_DRIVERS_KEY)
+    traces = [(scope, key) for scope, key in ODBC_TRACE_KEYS
+              if "%s" % env.reg(key, "Trace") == "1"]
+    named = bool(opts.get("sde_server")) and opts.get("sde_port") == 1433
+    return decide_odbc(env.registry_readable(), drivers, traces, named)
+
+
+def probe_dns(env, facts, opts):
+    host = opts.get("sde_server")
+    return decide_dns(host, env.resolve(host) if host else None)
+
+
+def probe_addins(env, facts):
+    local = env.getenv("LOCALAPPDATA")
+    if not local:
+        return decide_addins([], None, 0)
+    cache = ntpath.join(local, "ESRI", "ArcGISPro", "AssemblyCache")
+    onedrive = onedrive_roots(env)
+    network = env.network_drives()
+    folders = []
+    seen = set()
+    for scope, key in ADDIN_FOLDER_KEYS:
+        # An administrator registers a folder as a value name, a user often
+        # as the data. Whichever of the two looks like a path is the folder.
+        for name, data in sorted(env.reg_values(key).items()):
+            for candidate in (name, "%s" % (data or "")):
+                path = expand_vars(env, candidate.strip())
+                if (re.match(r"^(?:[A-Za-z]:\\|\\\\)", path)
+                        and path.lower() not in seen):
+                    seen.add(path.lower())
+                    folders.append((scope, path,
+                                    path_class(path, onedrive, network),
+                                    env.isdir(path)))
+    return decide_addins(folders, cache, len(env.subdirs(cache)))
+
+
 def probe_nic(env, facts):
     data, error = env.nic_power()
     if error is not None:
@@ -3341,6 +3800,14 @@ def registrations(env, facts, opts):
          lambda: probe_roaming(env, facts)),
         ("PF-27", "Display", "Map not redrawing after a field calculation", False,
          lambda: probe_symbology(env, facts)),
+        ("PF-30", "ArcGISPro", "Geoprocessing cache and Python setup", False,
+         lambda: probe_geoprocessing(env, facts)),
+        ("PF-31", "Geodatabase", "Database drivers (ODBC)", False,
+         lambda: probe_odbc(env, facts, opts)),
+        ("PF-32", "Network", "Name lookup for the database server", False,
+         lambda: probe_dns(env, facts, opts)),
+        ("PF-33", "ArcGISPro", "Add-ins loaded at start-up", False,
+         lambda: probe_addins(env, facts)),
     ]
 
 
@@ -3842,6 +4309,299 @@ _PRO_CLOSED = ("    if (Get-Process ArcGISPro -ErrorAction SilentlyContinue) {\n
                "    }\n")
 
 
+# -- the optional clean-up scripts ------------------------------------------
+# Each moves a folder aside with a dated name and prints the command that puts
+# it back. Pro rebuilds every one of these folders on its next start, so they
+# are safe to run whenever Pro is closed, alone or all together.
+
+_STAMP = "    $stamp = '{0:yyyyMMddHHmmss}' -f (Get-Date)\n"
+
+# A script block, defined once per script, that renames one folder aside.
+_ASIDE = (
+    "    $aside = {\n"
+    "        param($Folder)\n"
+    "        if (-not (Test-Path -LiteralPath $Folder)) {\n"
+    "            Write-Host \"Nothing to move: $Folder is not there.\"; return\n"
+    "        }\n"
+    "        $leaf = Split-Path $Folder -Leaf\n"
+    "        $name = '{0}.aside-{1}' -f $leaf, $stamp\n"
+    "        Rename-Item -LiteralPath $Folder -NewName $name\n"
+    "        Write-Host \"Moved aside: $Folder\"\n"
+    "        Write-Host \"  To undo, close Pro and run: Rename-Item "
+    "-LiteralPath '$(Join-Path (Split-Path $Folder) $name)' -NewName "
+    "'$leaf'\"\n"
+    "    }\n")
+
+_CACHE_PATH = (
+    "    $cache = (Get-ItemProperty -LiteralPath "
+    "'HKCU:\\Software\\ESRI\\ArcGISPro\\Settings' -Name 'Cache Path' "
+    "-ErrorAction SilentlyContinue).'Cache Path'\n"
+    "    if (-not $cache) { $cache = Join-Path $env:LOCALAPPDATA "
+    "'ESRI\\Local Caches' }\n"
+    # a trailing backslash would put the dated folder inside the cache
+    "    $cache = $cache.TrimEnd('\\')\n")
+
+_GP_FILES = (
+    "    $files = @(Get-ChildItem -LiteralPath $cache -File -Filter 'g*.cache' "
+    "-ErrorAction SilentlyContinue |\n"
+    "               Where-Object { $_.Name -match '^g\\d*\\.cache$' })\n"
+    "    if (-not $files) {\n"
+    "        Write-Host \"No geoprocessing cache files in $cache.\"\n"
+    "    } else {\n"
+    "        $dest = '{0}.gp-aside-{1}' -f $cache, $stamp\n"
+    "        New-Item -ItemType Directory -Path $dest | Out-Null\n"
+    "        $files | Move-Item -Destination $dest\n"
+    "        Write-Host \"Moved $($files.Count) geoprocessing cache file(s) to "
+    "$dest\"\n"
+    "        Write-Host \"  To undo, close Pro and run: Move-Item -Path "
+    "'$dest\\*' -Destination '$cache'\"\n"
+    "    }\n")
+
+_FOLDERS = (
+    ("index", "Join-Path $env:LOCALAPPDATA 'ESRI\\Index'"),
+    ("addins", "Join-Path $env:LOCALAPPDATA 'ESRI\\ArcGISPro\\AssemblyCache'"),
+    ("history", "Join-Path $env:APPDATA 'ESRI\\ArcGISPro\\ArcToolbox\\History'"),
+)
+
+
+def _aside_script(*folders):
+    """One pasteable block that renames each named folder aside."""
+    exprs = dict(_FOLDERS)
+    body = "".join(["    & $aside (%s)\n" % exprs[f] for f in folders])
+    return "& {\n" + _PRO_CLOSED + _STAMP + _ASIDE + body + "}"
+
+
+def _gp_cache_script():
+    return "& {\n" + _PRO_CLOSED + _STAMP + _CACHE_PATH + _GP_FILES + "}"
+
+
+def _whole_cache_script():
+    return ("& {\n" + _PRO_CLOSED + _STAMP + _ASIDE + _CACHE_PATH
+            + "    & $aside $cache\n}")
+
+
+def _everything_script():
+    exprs = dict(_FOLDERS)
+    return ("& {\n" + _PRO_CLOSED + _STAMP + _ASIDE + _CACHE_PATH
+            + "    & $aside $cache\n"
+            + "".join(["    & $aside (%s)\n" % exprs[f]
+                       for f in ("index", "addins", "history")])
+            + "    Write-Host 'Done. Pro rebuilds these folders the next time "
+              "it starts, so the first start is slower than usual.'\n}")
+
+
+_SOFT_RESET = (
+    "& {\n"
+    "    $Preview = $true    # change to $false to reset\n"
+    + _PRO_CLOSED + _STAMP + _ASIDE +
+    "    $folders = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "
+    "'ESRI') -Directory -Filter 'ArcGISPro*' -ErrorAction SilentlyContinue |\n"
+    "                 Where-Object { $_.Name -notmatch '\\.aside-' } | "
+    "ForEach-Object { $_.FullName })\n"
+    "    $folders += Join-Path $env:APPDATA 'ESRI\\ArcGISPro'\n"
+    "    $key = 'HKCU:\\Software\\ESRI\\ArcGISPro'\n"
+    "    if ($Preview) {\n"
+    "        $folders | Where-Object { Test-Path -LiteralPath $_ } | "
+    "ForEach-Object { Write-Host \"Would move aside: $_\" }\n"
+    "        if (Test-Path -LiteralPath $key) { Write-Host \"Would back up "
+    "and move aside: $key\" }\n"
+    "        Write-Host 'Nothing changed. Set $Preview = $false to reset.'\n"
+    "        return\n"
+    "    }\n"
+    "    foreach ($f in $folders) { & $aside $f }\n"
+    "    if (Test-Path -LiteralPath $key) {\n"
+    "        $backup = Join-Path ([Environment]::GetFolderPath('Desktop')) "
+    "('ArcGISPro-settings-{0}.reg' -f $stamp)\n"
+    "        reg export 'HKCU\\Software\\ESRI\\ArcGISPro' \"$backup\" /y | "
+    "Out-Null\n"
+    "        Rename-Item -LiteralPath $key -NewName \"ArcGISPro.aside-$stamp\"\n"
+    "        Write-Host \"Moved aside: $key (a copy is saved in $backup)\"\n"
+    "        Write-Host \"  To undo, close Pro and run: Rename-Item "
+    "-LiteralPath 'HKCU:\\Software\\ESRI\\ArcGISPro.aside-$stamp' -NewName "
+    "'ArcGISPro'\"\n"
+    "    }\n"
+    "    Write-Host 'Pro starts with default settings. Sign in again, and "
+    "add your folder and database connections back from Favorites if they "
+    "are missing.'\n"
+    "}")
+
+
+def optional_scripts():
+    """[(title, what it does, PowerShell)] offered on every report.
+
+    Lightest first. These are the folders Pro rebuilds on its own, so a
+    person may clear them whatever the checks found: a cache can be the
+    cause while every measurement reads healthy. The last one resets Pro's
+    settings, and says so before it does anything.
+    """
+    return [
+        ("Clear the geoprocessing cache files",
+         "Moves only the g*.cache files out of the local cache, into a dated "
+         "folder beside it. Pro builds them again once, at its next start. "
+         "Try this first when Pro sits at \"Creating geoprocessing cache\".",
+         _gp_cache_script()),
+        ("Move the whole local cache aside",
+         "Renames the local cache folder (map, tile and geoprocessing "
+         "caches). Maps draw more slowly for a while as Pro refills it.",
+         _whole_cache_script()),
+        ("Rebuild the search index",
+         "Renames the Catalog search index so Pro builds a new one. Searching "
+         "in Catalog is incomplete until it finishes.",
+         _aside_script("index")),
+        ("Clear the add-in cache",
+         "Renames the add-in cache so Pro unpacks each add-in again. Use it "
+         "when an add-in misbehaves after an update.",
+         _aside_script("addins")),
+        ("Move the geoprocessing log files aside",
+         "Renames the folder of geoprocessing XML log files. To stop them "
+         "building up, turn off geoprocessing logging in Pro: Settings > "
+         "Options > Geoprocessing.",
+         _aside_script("history")),
+        ("Do all of the above at once",
+         "Moves the local cache, the search index, the add-in cache and the "
+         "geoprocessing logs aside in one go, and prints how to undo each.",
+         _everything_script()),
+        ("Reset ArcGIS Pro's settings (soft reset)",
+         "Esri's soft reset: renames Pro's settings folders and backs up and "
+         "moves aside its registry settings. Projects and data are not "
+         "touched, but Favorites, recent projects, sign-in and options go "
+         "back to defaults. Run it as it is first: it only lists what it "
+         "would do. Change $Preview to $false to reset.",
+         _SOFT_RESET),
+    ]
+
+
+def _check_scripts(check):
+    """The scripts for the checks added for geoprocessing and start-up."""
+    cid = check["id"]
+    out = []
+    by_title = dict([(t, (t, w, c)) for t, w, c in optional_scripts()])
+    if cid == "PF-30":
+        if re.search(r"^PYTHON\w+ = ", check["observed"], re.MULTILINE):
+            out.append((
+                "Remove the Python variables",
+                "Removes PYTHONPATH, PYTHONHOME and PYTHONSTARTUP from your "
+                "user account and prints each old value so it can be put "
+                "back. A variable set for the whole computer needs IT.",
+                "& {\n"
+                "    foreach ($name in 'PYTHONPATH', 'PYTHONHOME', "
+                "'PYTHONSTARTUP') {\n"
+                "        $value = [Environment]::GetEnvironmentVariable($name, "
+                "'User')\n"
+                "        if ($value) {\n"
+                "            [Environment]::SetEnvironmentVariable($name, $null, "
+                "'User')\n"
+                "            Write-Host \"Removed $name (it was $value).\"\n"
+                "            Write-Host \"  To undo: [Environment]::"
+                "SetEnvironmentVariable('$name', '$value', 'User')\"\n"
+                "        }\n"
+                "        if ([Environment]::GetEnvironmentVariable($name, "
+                "'Machine')) {\n"
+                "            Write-Warning \"$name is also set for the whole "
+                "computer. Ask IT to remove it.\"\n"
+                "        }\n"
+                "    }\n"
+                "    Write-Host 'Sign out and back in (or restart) so Pro "
+                "starts without them.'\n"
+                "}"))
+        if "<older release>" in check["observed"]:
+            out.append((
+                "Switch Pro back to its own Python environment",
+                "Points Pro at arcgispro-py3, the environment installed with "
+                "this release. The old clone is left in place; clone "
+                "arcgispro-py3 again in Package Manager if you need extra "
+                "packages.",
+                "& {\n" + _PRO_CLOSED +
+                "    $pro = (Get-ItemProperty -LiteralPath "
+                "'HKLM:\\SOFTWARE\\ESRI\\ArcGISPro' -ErrorAction "
+                "SilentlyContinue).InstallDir\n"
+                "    if (-not $pro) { $pro = Join-Path $env:ProgramFiles "
+                "'ArcGIS\\Pro' }\n"
+                "    $swap = Join-Path $pro 'bin\\Python\\Scripts\\proswap.bat'\n"
+                "    if (-not (Test-Path -LiteralPath $swap)) {\n"
+                "        Write-Warning \"proswap.bat is not at $swap.\"; return\n"
+                "    }\n"
+                "    & $swap arcgispro-py3\n"
+                "    Write-Host 'Pro uses arcgispro-py3 from its next start. To "
+                "go back, pick the clone in Pro: Settings > Package Manager.'\n"
+                "}"))
+        out.append(by_title["Clear the geoprocessing cache files"])
+        if re.search(r"ArcToolbox\\History  \d+ log", check["observed"]):
+            out.append(by_title["Move the geoprocessing log files aside"])
+    elif cid == "PF-31":
+        if "tracing: on" in check["observed"]:
+            out.append((
+                "Turn off ODBC tracing",
+                "Stops ODBC tracing for your account and prints the command to "
+                "turn it back on. Tracing set for the whole computer needs "
+                "IT.",
+                "& {\n"
+                "    $key = 'HKCU:\\Software\\ODBC\\ODBC.INI\\ODBC'\n"
+                "    if ((Get-ItemProperty -LiteralPath $key -Name Trace "
+                "-ErrorAction SilentlyContinue).Trace -eq '1') {\n"
+                "        Set-ItemProperty -LiteralPath $key -Name Trace -Value "
+                "'0'\n"
+                "        Write-Host 'ODBC tracing is off for your account.'\n"
+                "        Write-Host \"  To undo: Set-ItemProperty -LiteralPath "
+                "'$key' -Name Trace -Value '1'\"\n"
+                "    } else {\n"
+                "        Write-Host 'ODBC tracing was not on for your account.'\n"
+                "    }\n"
+                "    if ((Get-ItemProperty -LiteralPath "
+                "'HKLM:\\SOFTWARE\\ODBC\\ODBC.INI\\ODBC' -Name Trace "
+                "-ErrorAction SilentlyContinue).Trace -eq '1') {\n"
+                "        Write-Warning 'Tracing is also on for the whole "
+                "computer. Ask IT to stop it in ODBC Data Sources (64-bit) > "
+                "Tracing.'\n"
+                "    }\n"
+                "}"))
+        out.append((
+            "List the SQL Server drivers",
+            "Read-only. Lists the 64-bit SQL Server ODBC drivers, to send to "
+            "IT with the request.",
+            "Get-OdbcDriver -Platform '64-bit' | Where-Object Name -like "
+            "'*SQL Server*' | Format-Table Name, Platform -AutoSize"))
+    elif cid == "PF-32":
+        host = check["observed"].split(" -> ")[0].strip()
+        if host and not re.search(r"[\s'\"]", host):
+            out.append((
+                "Time the name lookup again",
+                "Read-only. Looks the server up three times and shows the DNS "
+                "servers this computer asks, for the network team.",
+                "& {\n"
+                "    1..3 | ForEach-Object {\n"
+                "        $ms = (Measure-Command { Resolve-DnsName -Name %s "
+                "-DnsOnly -ErrorAction SilentlyContinue }).TotalMilliseconds\n"
+                "        Write-Host (\"Lookup {0}: {1:N0} ms\" -f $_, $ms)\n"
+                "    }\n"
+                "    Get-DnsClientServerAddress -AddressFamily IPv4 | "
+                "Where-Object ServerAddresses | Format-Table InterfaceAlias, "
+                "ServerAddresses -AutoSize\n"
+                "}" % _ps_quote(host)))
+    elif cid == "PF-33":
+        out.append((
+            "List the add-in folders",
+            "Read-only. Shows each add-in folder Pro reads at start-up and "
+            "whether it can be reached now.",
+            "& {\n"
+            "    foreach ($key in 'HKCU:\\Software\\ESRI\\ArcGISPro\\Settings"
+            "\\Add-In Folders', 'HKLM:\\SOFTWARE\\ESRI\\ArcGISPro\\Settings"
+            "\\Add-In Folders') {\n"
+            "        $item = Get-Item -LiteralPath $key -ErrorAction "
+            "SilentlyContinue\n"
+            "        if (-not $item) { continue }\n"
+            "        foreach ($name in $item.GetValueNames()) {\n"
+            "            $path = if ($name -match '^[A-Za-z]:\\\\|^\\\\\\\\') "
+            "{ $name } else { $item.GetValue($name) }\n"
+            "            [pscustomobject]@{ Folder = $path; Reachable = "
+            "[bool](Test-Path -LiteralPath $path) }\n"
+            "        }\n"
+            "    }\n"
+            "}"))
+        out.append(by_title["Clear the add-in cache"])
+    return out
+
+
 def cleanup_scripts(check):
     """[(title, what it does, PowerShell)] that help with this check's step.
 
@@ -4033,6 +4793,8 @@ def cleanup_scripts(check):
             "Opens the page where ArcGIS Pro can be set to High performance "
             "by hand, if you would rather not use --apply.",
             "Start-Process ms-settings:display-advancedgraphics"))
+    else:
+        out.extend(_check_scripts(check))
     return out
 
 
@@ -4434,6 +5196,20 @@ def render_html(document):
                           _h(check["id"]), _h(check["fix"])))
         out.append("</ul></div>")
     out.append("</section>")
+
+    out.append('<section id="cleanup"><h2>Optional clean-up</h2>'
+               '<p class="lede">Caches and settings Pro rebuilds on its own. '
+               'A cache can slow Pro down even when every check above reads '
+               'OK, so these are offered on every report. Each script moves '
+               'folders aside with a dated name, never deletes them, and '
+               'prints the command to put them back. Run one, or all of '
+               'them, with ArcGIS Pro closed. They are listed lightest '
+               'first; the last one resets your Pro settings.</p>'
+               '<details><summary>Show the clean-up scripts</summary>')
+    out.extend(_html_scripts(optional_scripts(), ids))
+    out.append('<p class="tip">To run a script: open Windows PowerShell from '
+               'the Start menu (not as administrator), paste it, and press '
+               'Enter.</p></details></section>')
     out.append("</div></main>")
     out.append('<footer><div class="wrap">prostall report format %d. '
                'Check results only: the scripts above run only if you paste '
@@ -4478,7 +5254,8 @@ class FakeEnv(Env):
                  mem=(None, None), disks=None, power=(None, None),
                  tcp_map=None, envvars=None, text=None, user="editor",
                  admin=False, clock=1700000000.0, unreadable=(), ps=None,
-                 events=None, listing=None, zips=None, netdrives=()):
+                 events=None, listing=None, zips=None, netdrives=(),
+                 dns=None):
         self._reg = dict([(_norm(k), v) for k, v in (reg or {}).items()])
         self._subkeys = dict([(_norm(k), v)
                               for k, v in (subkeys or {}).items()])
@@ -4499,6 +5276,7 @@ class FakeEnv(Env):
         self._listing = dict([(_norm(k), v) for k, v in (listing or {}).items()])
         self._zips = dict([(_norm(k), v) for k, v in (zips or {}).items()])
         self._netdrives = list(netdrives)
+        self._dns = dict(dns or {})
         self.zip_reads = []
         self.written = []
 
@@ -4519,6 +5297,9 @@ class FakeEnv(Env):
 
     def reg_subkeys(self, path):
         return list(self._subkeys.get(_norm(path), []))
+
+    def reg_values(self, path):
+        return dict(self._reg.get(_norm(path), {}))
 
     def reg_write(self, path, name, value):
         self._reg.setdefault(_norm(path), {})[name] = value
@@ -4600,6 +5381,10 @@ class FakeEnv(Env):
     def tcp(self, host, port, timeout_ms):
         return self._tcp.get(host, (False, timeout_ms,
                                     "no answer within %d ms" % timeout_ms))
+
+    def resolve(self, host):
+        return self._dns.get(host, (None, 5, "no such host on the stand-in "
+                                              "machine"))
 
     def _answer(self, key):
         return self._ps.get(key, (None, "not available on the stand-in machine"))
@@ -4705,7 +5490,8 @@ def fake_healthy():
                   "Cache Path": cache},
              PRO_REG_KEY: {"Version": "3.4", "RealVersion": "3.4.0",
                            "BuildNumber": "55405",
-                           "InstallDir": r"C:\Program Files\ArcGIS\Pro"},
+                           "InstallDir": r"C:\Program Files\ArcGIS\Pro",
+                           "PythonCondaEnv": "arcgispro-py3"},
              r"HKLM\SOFTWARE\Policies\Microsoft\Windows\NetCache": {"Enabled": 0},
              r"HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps":
                  {"DumpFolder": r"C:\ProgramData\CrashDumps"},
@@ -4715,7 +5501,9 @@ def fake_healthy():
              r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1":
                  {"ProfileImagePath": home}},
         subkeys={r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList":
-                     ["S-1-5-21-1"]},
+                     ["S-1-5-21-1"],
+                 ODBC_DRIVERS_KEY: ["ODBC Drivers", "SQL Server",
+                                    "ODBC Driver 18 for SQL Server"]},
         tree={r"C:\Users": [("editor", 0, 0, 0, True),
                             ("Public", 0, 0, 0, True)],
               home: [("Documents", 0, 0, 0, True), ("user.config", 900, 1, 0, False)],
@@ -4760,6 +5548,8 @@ def fake_sick():
     index = home + r"\AppData\Local\ESRI\Index"
     temp = home + r"\AppData\Local\Temp"
     favorites = home + r"\AppData\Roaming\ESRI\ArcGISPro\Favorites"
+    conda = home + r"\AppData\Local\ESRI\conda\envs"
+    history = home + r"\AppData\Roaming\ESRI\ArcGISPro\ArcToolbox\History"
     return FakeEnv(
         envvars={"USERPROFILE": home, "APPDATA": home + r"\AppData\Roaming",
                  "LOCALAPPDATA": home + r"\AppData\Local",
@@ -4773,11 +5563,20 @@ def fake_sick():
                   "Cache Path": cache},
              PRO_REG_KEY: {"Version": "3.4",
                            "InstallDir": r"C:\Program Files\ArcGIS\Pro"},
+             # an ArcMap-era variable, and Pro pointed at a clone made under
+             # 3.2: the two named causes of a cache rebuilt at every start
+             r"HKCU\Environment": {"PYTHONPATH": r"C:\Python27\ArcGIS10.8\Lib"},
+             PRO_USER_KEY: {"PythonCondaEnv": conda + r"\arcgispro-py3-clone"},
+             r"HKCU\Software\ODBC\ODBC.INI\ODBC": {"Trace": "1"},
+             PRO_REG_KEY + r"\Settings\Add-In Folders":
+                 {r"\\files\gis\addins": ""},
              r"HKLM\SOFTWARE\Policies\Microsoft\Windows\NetCache": {"Enabled": 1},
              r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-21-1":
                  {"ProfileImagePath": "%USERPROFILE%",
                   "CentralProfile": r"\\server\profiles\editor"}},
         subkeys={r"HKCU\SOFTWARE\Microsoft\OneDrive\Accounts": ["Business1"],
+                 ODBC_DRIVERS_KEY: ["SQL Server", "SQL Server Native Client 11.0",
+                                    "ODBC Driver 17 for SQL Server"],
                  r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList":
                      ["S-1-5-21-1"]},
         tree={r"C:\Users": [("editor", 0, 0, 0, True)],
@@ -4795,6 +5594,13 @@ def fake_sick():
                                         for n in range(12)]
                                        + [("c0.sdeold", 800, 30, 0, False)],
               favorites: [("prod.sde", 900, 40, 0, False)],
+              conda: [("arcgispro-py3-clone", 0, 400, 0, True)],
+              conda + r"\arcgispro-py3-clone": [("conda-meta", 0, 400, 0, True)],
+              conda + r"\arcgispro-py3-clone\conda-meta":
+                  [("arcpy-3.2.0-py39_arcgispro_49690.json", 9000, 400, 0, False),
+                   ("numpy-1.24.3-py39.json", 9000, 400, 0, False)],
+              history: [("hist%04d.xml" % n, 2048, 1, 0, False)
+                        for n in range(GP_HISTORY_MANY + 200)],
               temp: [("ArcGISProTemp12345", 0, 0, 0, True),
                      ("ArcGISProTemp67890", 0, 0, 0, True),
                      ("ArcGISProTemp24680", 0, 0, 0, True)],
@@ -4820,6 +5626,7 @@ def fake_sick():
         mem=(8.0, 1.0),
         disks={"c:\\": (500 * 1024 ** 3, 5 * 1024 ** 3)},
         power=("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced"),
+        dns={"gisdb": (["10.20.0.15"], 900, None)},
         tcp_map={"gisdb": (False, 4000, "no answer within 4000 ms"),
                  "portal.example.org": (True, 2400, None)},
         ps={"defender": ({"DisableRealtimeMonitoring": False,
@@ -5874,6 +6681,7 @@ def self_test():
         "PF-26": "Warn", "PF-27": "Info",
         "DL-04": "Warn", "DL-13": "Warn", "PF-02": "Info", "PF-03": "Info",
         "PF-17": "Warn", "PF-22": "Info",
+        "PF-30": "Warn", "PF-31": "Warn", "PF-32": "Warn", "PF-33": "Warn",
     }
     for cid in sorted(expected_run):
         check(got.get(cid) == expected_run[cid],
@@ -7392,6 +8200,132 @@ def self_test():
     check("Scripts that can help" in sick_html
           and "Scripts that can help" not in healthy_html,
           "scripts are offered only for steps, so a healthy machine gets none")
+    optional = optional_scripts()
+    check("Optional clean-up" in healthy_html
+          and "Optional clean-up" in sick_html,
+          "the clean-up scripts are on every report, healthy or not: a cache "
+          "can be the cause while every measurement reads OK")
+    check(all([code.startswith("& {") and code.rstrip().endswith("}")
+               and "Get-Process ArcGISPro" in code
+               for t, w, code in optional]),
+          "every clean-up script is one block that first checks Pro is "
+          "closed")
+    check(not [code for t, w, code in optional
+               if "Remove-Item" in code or " del " in code
+               or "DeleteDirectory" in code],
+          "no clean-up script deletes anything: each moves folders aside and "
+          "prints the undo  <-- pinned defect")
+    check(all(["To undo" in code for t, w, code in optional]),
+          "and every one of them prints how to put things back")
+    reset = optional[-1][2]
+    check("soft reset" in optional[-1][0].lower()
+          and "$Preview = $true" in reset
+          and reset.index("if ($Preview)") < reset.index("foreach ($f in")
+          and reset.index("reg export") < reset.index("Rename-Item "
+                                                       "-LiteralPath $key"),
+          "the settings reset is last, only lists what it would do until "
+          "told otherwise, and backs up the registry before moving it")
+    everything = [code for t, w, code in optional if "all of the above" in t][0]
+    check(all([part in everything for part in
+               ("& $aside $cache", "ESRI\\Index", "AssemblyCache",
+                "ArcToolbox\\History")])
+          and "ArcGISPro.aside" not in everything,
+          "the all-at-once script covers every cache folder and leaves Pro's "
+          "settings alone")
+    check("Turn off ODBC tracing" in sick_html
+          and "Switch Pro back to its own Python environment" in sick_html
+          and "Remove the Python variables" in sick_html
+          and "Turn off ODBC tracing" not in healthy_html,
+          "a step for a new check carries its own scripts, and only on the "
+          "machine that needs them")
+
+    # --------------------------------- geoprocessing and database start-up
+    print("-" * 70)
+    print("geoprocessing and database start-up")
+    check(arcpy_version(["numpy-1.24.json", "arcpy-3.4.1-py311_1.json"])
+          == "3.4" and arcpy_version(["arcpy-base-3.5.0-py311.json"]) == "3.5"
+          and arcpy_version(["arcpy-tools.json"]) is None,
+          "an environment's release is read from its conda-meta record names, "
+          "without starting its Python")
+    gp = lambda **kw: make_check(**decide_geoprocessing(**dict(dict(
+        pro_version="3.4", cache_path=r"C:\c", gp_files=[("g0.cache", 9, 1.0)],
+        python_vars=[], active_env="arcgispro-py3", clones=[], history=None),
+        **kw)))
+    check(gp()["status"] == "Pass", "a clean setup passes")
+    check(gp(python_vars=[("user", "PYTHONPATH", r"C:\Python27")])["status"]
+          == "Warn", "a PYTHONPATH set for every program warns")
+    check(gp(clones=[("old", "3.2")], active_env=r"C:\x\old")["status"]
+          == "Warn",
+          "Pro pointed at a clone from an older release warns")
+    check(gp(clones=[("old", "3.2")])["status"] == "Pass",
+          "an old clone Pro is not using is listed, not graded")
+    check(gp(clones=[("old", "3.2")], active_env=None)["status"] == "Info",
+          "and with the active environment unreadable it is Info, not a "
+          "guess either way  <-- pinned defect")
+    check(gp(clones=[("new", "3.4")], active_env="new")["status"] == "Pass",
+          "a clone made under this release is fine")
+    check(gp(history=("h", GP_HISTORY_MANY - 1, 0))["status"] == "Pass"
+          and gp(history=("h", GP_HISTORY_MANY, 0))["status"] == "Warn",
+          "the log-file allowance is inclusive at its threshold")
+    check(gp(pro_version=None, gp_files=None)["status"] == "Info"
+          and gp(pro_version=None, gp_files=None)["measured"] is False,
+          "no Pro and no cache folder is unmeasured, not a pass")
+    var_env = fake_healthy()
+    var_env._env["PYTHONPATH"] = r"C:\launcher\lib"
+    check(by_id(run(var_env, opts_with())["checks"], "PF-30")["status"]
+          == "Pass",
+          "a Python variable set only in the launcher's process is not read "
+          "as one Pro inherits: the registry is what a new Pro starts with  "
+          "<-- pinned defect")
+    odbc = lambda **kw: make_check(**decide_odbc(**dict(dict(
+        readable=True, drivers=["SQL Server", "ODBC Driver 18 for SQL Server"],
+        traces=[], sql_server_named=False), **kw)))
+    check(odbc()["status"] == "Pass",
+          "Windows' own \"SQL Server\" driver beside a supported one is not "
+          "a second version  <-- pinned defect")
+    check(odbc(drivers=["ODBC Driver 17 for SQL Server",
+                        "ODBC Driver 18 for SQL Server"])["status"] == "Pass",
+          "two supported drivers side by side pass")
+    check(odbc(drivers=["SQL Server Native Client 11.0",
+                        "ODBC Driver 18 for SQL Server"])["status"] == "Warn",
+          "an older driver beside the supported one warns, as Esri advises")
+    check(odbc(traces=[("user", "k")])["status"] == "Warn",
+          "ODBC tracing on warns")
+    check(odbc(drivers=["SQL Server"])["status"] == "Info"
+          and odbc(drivers=["SQL Server"], sql_server_named=True)["status"]
+          == "Warn",
+          "no supported driver is Info until a SQL Server host is named")
+    check(odbc(readable=False)["status"] == "Info"
+          and odbc(readable=False)["measured"] is False,
+          "an unreadable registry is unmeasured")
+    check(make_check(**decide_dns(None, None))["status"] == "Skipped",
+          "with no host named the lookup is skipped and nothing is sent")
+    check(make_check(**decide_dns("db", (None, 5, "x")))["status"] == "Info",
+          "a name that does not resolve is Info, as in DL-10")
+    check(make_check(**decide_dns("db", (["10.0.0.1"], DNS_WARN_MS, None)))
+          ["status"] == "Pass"
+          and make_check(**decide_dns("db", (["10.0.0.1"], DNS_WARN_MS + 1,
+                                             None)))["status"] == "Warn",
+          "the lookup allowance is inclusive at its threshold")
+    addins = lambda folders, path=r"C:\a": make_check(
+        **decide_addins(folders, path, 2))
+    check(addins([])["status"] == "Pass", "no add-in folders passes")
+    check(addins([("machine", r"\\fs\addins", "NETWORK", True)])["status"]
+          == "Warn" and addins([("user", r"D:\gone", "LOCAL", False)])
+          ["status"] == "Warn",
+          "an add-in folder on a share, or one that is gone, warns")
+    check(addins([], None)["status"] == "Info"
+          and addins([], None)["measured"] is False,
+          "no profile is unmeasured")
+    reg_env = fake_healthy()
+    reg_env._reg[_norm(ADDIN_FOLDER_KEYS[1][1])] = {r"\\fs\addins": ""}
+    reg_env._reg[_norm(ADDIN_FOLDER_KEYS[0][1])] = {"Folder1": r"\\fs\addins",
+                                                     "Folder2": r"\\fs\more"}
+    found = by_id(run(reg_env, opts_with())["checks"], "PF-33")
+    check(found["observed"].count(r"\\fs\addins") == 1
+          and r"\\fs\more" in found["observed"],
+          "an add-in folder is read from the value name or the data, and one "
+          "registered twice is listed once")
     check("Nothing needs fixing" in healthy_html,
           "a healthy run says nothing needs fixing")
     check("Almost nothing could be checked"
